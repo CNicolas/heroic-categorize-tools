@@ -1,0 +1,70 @@
+{
+  "_comment": "Key = Steam/SteamSpy tag or genre (English, lowercase). Value = the Heroic category name you want it to appear as. Add or edit lines freely. The most-voted SteamSpy tags are tested first, in popularity order. A value can be a single category or a list of them.",
+
+  "city builder": "City Builder",
+  "colony sim": "City Builder",
+  "urban": "City Builder",
+  "building": "City Builder",
+
+  "rpg": "RPG",
+  "action rpg": "RPG",
+  "jrpg": "RPG",
+  "crpg": "RPG",
+  "role-playing": "RPG",
+
+  "rts": "RTS",
+  "real time strategy": "RTS",
+  "real-time strategy": "RTS",
+
+  "sports": "Sports",
+  "sport": "Sports",
+  "racing": "Sports",
+  "football": "Sports",
+  "soccer": "Sports",
+
+  "fps": "FPS",
+  "first-person shooter": "FPS",
+  "shooter": "FPS",
+
+  "hack and slash": "Action",
+  "beat 'em up": "Action",
+  "action": "Action",
+
+  "simulation": "Simulation",
+  "life sim": "Simulation",
+  "farming sim": "Simulation",
+  "immersive sim": "Simulation",
+  "management": "Simulation",
+  "automobile sim": "Simulation",
+  "space sim": "Simulation",
+
+  "horror": "Horror",
+  "survival horror": ["Horror", "Survival"],
+  "psychological horror": "Horror",
+
+  "co-op": "Co-op",
+  "online co-op": "Co-op",
+  "local co-op": "Co-op",
+  "co-op campaign": "Co-op",
+
+  "adventure": "Adventure",
+  "point & click": "Adventure",
+  "walking simulator": "Adventure",
+  "story rich": "Adventure",
+
+  "puzzle": "Puzzle",
+  "puzzle-platformer": "Puzzle",
+
+  "strategy": "Strategy",
+  "grand strategy": "Strategy",
+
+  "turn-based": "Turn-Based",
+  "turn-based strategy": ["Strategy", "Turn-Based"],
+  "turn-based tactics": ["Turn-Based"],
+  "turn-based combat": ["Turn-Based"],
+
+  "4x": "4X",
+
+  "survival": "Survival",
+  "open world survival craft": "Survival"
+}

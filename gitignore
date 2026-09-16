@@ -1,0 +1,16 @@
+# Personal data: your libraries and the cache built from them.
+# Keep these out of the repo (see the Privacy note in README.md).
+steam_cache.json
+proposal*.csv
+similar.csv
+
+# Your own library lists (the *.example.txt templates are tracked instead)
+steam-games.txt
+favorites-not-on-pc.txt
+epic-games.txt
+gog-games.txt
+amazon-games.txt
+
+# Heroic backups, in case you work inside this folder
+*.bak-*
+__pycache__/
