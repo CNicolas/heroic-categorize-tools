@@ -53,6 +53,7 @@ import shutil
 import stat
 import sys
 import time
+import urllib.parse
 import uuid
 from datetime import datetime
 
@@ -174,6 +175,10 @@ def read_list(path):
         for line in f:
             line = line.strip()
             if line and not line.startswith("#"):
+                # Some library exporters insert a stray space before an
+                # apostrophe (e.g. "Lovers ' Smiles"), which throws off both
+                # the Steam search and the dedup key. Tidy that up.
+                line = re.sub(r"\s+(['\u2019])", r"\1", line)
                 out.append(line)
     return out
 
@@ -235,6 +240,10 @@ def art_for(appid):
     )
 
 
+def steam_search_url(title):
+    return "https://store.steampowered.com/search/?term=" + urllib.parse.quote(title)
+
+
 def make_launcher(launch_dir, title, appid):
     """Write the small launcher script and return its absolute path."""
     os.makedirs(launch_dir, exist_ok=True)
@@ -250,8 +259,14 @@ def make_launcher(launch_dir, title, appid):
 def build_entry(title, appid, kind, launcher_path=None, launch_dir=None):
     """Build a sideload entry in the shape Heroic expects.
 
-    kind == "steam"     : genuinely launchable (executable = launcher script)
-    kind == "favorites" : browser entry pointing at the Steam store page
+    kind == "steam" with an appid  : genuinely launchable (executable = launcher script)
+    kind == "steam" without an appid : no Steam page was found automatically,
+        so there is nothing to launch yet -- created as a browser placeholder
+        pointing at a Steam *search* for the title, so you can look it up,
+        fix the title, or add the real launcher by hand later.
+    kind == "favorites"             : browser entry pointing at the Steam store page
+        (or a search page, if no exact page was found -- e.g. games that only
+        ever existed on a console or another launcher, with no Steam page at all)
     """
     app_name = app_name_for(title)
     cover, square = art_for(appid)
@@ -264,10 +279,10 @@ def build_entry(title, appid, kind, launcher_path=None, launch_dir=None):
         "art_cover": cover,
         "art_square": square,
         "is_installed": True,
-        "canRunOffline": kind == "steam",
+        "canRunOffline": kind == "steam" and bool(appid),
     }
 
-    if kind == "steam":
+    if kind == "steam" and appid:
         entry["install"] = {
             "executable": launcher_path,
             "platform": heroic_platform(),
@@ -275,9 +290,17 @@ def build_entry(title, appid, kind, launcher_path=None, launch_dir=None):
         }
         entry["folder_name"] = launch_dir
         entry["description"] = "Steam game imported into Heroic for categorisation."
+    elif kind == "steam":
+        entry["install"] = {"platform": "Browser", "is_installed": True}
+        entry["browserUrl"] = steam_search_url(title)
+        entry["description"] = (
+            "No Steam page found automatically -- placeholder pointing at a "
+            "Steam search for this title. Fix the title and re-run, or "
+            "replace this entry by hand once you have found the right game."
+        )
     else:
         entry["install"] = {"platform": "Browser", "is_installed": True}
-        entry["browserUrl"] = store_url or "https://store.steampowered.com/"
+        entry["browserUrl"] = store_url or steam_search_url(title)
         entry["description"] = "Reference entry (not owned on PC) -- opens the Steam store page."
 
     return entry
@@ -406,7 +429,7 @@ def run_import(args, kind):
 
         if not appid:
             unmatched.append(title)
-            if kind == "steam" and not args.keep_unmatched:
+            if args.skip_unmatched:
                 continue
 
         launcher = None
@@ -454,8 +477,17 @@ def run_import(args, kind):
 
     if unmatched:
         print()
-        print(f"{len(unmatched)} title(s) with no Steam match "
-              f"(empty category, fill it in by hand in the CSV):")
+        if args.skip_unmatched:
+            print(f"{len(unmatched)} title(s) with no Steam match, skipped entirely "
+                  f"(--skip-unmatched): not in the CSV, not added to Heroic.")
+        elif kind == "steam":
+            print(f"{len(unmatched)} title(s) with no Steam match: added anyway, as a "
+                  f"non-launchable placeholder pointing at a Steam search, with an "
+                  f"empty category to fill in by hand:")
+        else:
+            print(f"{len(unmatched)} title(s) with no Steam match (often games with no "
+                  f"Steam page at all -- Battle.net, a console, a launcher of their own): "
+                  f"added with an empty category to fill in by hand:")
         for t in unmatched:
             print(f"  - {t}")
 
@@ -495,6 +527,9 @@ def add_common(p, default_output, default_extra):
                    help="Disable the demo/beta/tool/DLC filter")
     p.add_argument("--launchers-dir", default="~/heroic-steam-launchers",
                    help="Folder for the generated Steam launcher scripts")
+    p.add_argument("--skip-unmatched", action="store_true",
+                   help="Drop titles with no Steam match entirely instead of adding "
+                        "them as an uncategorised placeholder")
     p.add_argument("--limit", type=int, default=0, help="Cap the number of games (testing)")
     p.add_argument("--dry-run", action="store_true", help="Do not write to Heroic, just show the result")
     p.add_argument("--force", action="store_true", help="Ignore the running-Heroic detection")
@@ -513,15 +548,11 @@ def build_parser():
     add_common(p_steam, "proposal_steam.csv", ["Steam"])
     p_steam.add_argument("--no-launcher", action="store_true",
                          help="Do not generate launcher scripts (reference-only entries)")
-    p_steam.add_argument("--keep-unmatched", action="store_true",
-                         help="Also import titles with no Steam appid")
     p_steam.set_defaults(func=cmd_steam)
 
     p_fav = sub.add_parser("favorites",
                            help="Import games not owned on PC (favourites, for reference)")
     add_common(p_fav, "proposal_favorites.csv", ["Favorites"])
-    p_fav.add_argument("--keep-unmatched", action="store_true", default=True,
-                       help="Also import titles with no Steam appid (default: yes)")
     p_fav.set_defaults(func=cmd_favorites, no_launcher=True)
 
     return parser

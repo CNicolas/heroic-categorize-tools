@@ -40,6 +40,7 @@ import itertools
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 import time
@@ -148,12 +149,46 @@ def normalize(text):
     return text.lower().strip()
 
 
+# Edition/version qualifiers that commonly differ between a store listing and
+# the name typed by a user (or exported from a client in another language),
+# without changing which actual game is meant. Covers both English and French
+# since library exports frequently come from a French-language Steam client.
+_EDITION_NOISE_RE = re.compile(
+    r"\b("
+    r"goty|game of the year( edition)?|"
+    r"definitive|complete|enhanced|ultimate|deluxe|special|extended|"
+    r"remaster(ed)?|directors? cut|anniversary|classic|redux|reforged|"
+    r"version originale|version amelioree|version complete|version integrale|"
+    r"edition definitive|edition ultime|edition complete|edition integrale|"
+    r"edition|jeu de l annee"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def strip_edition_noise(text):
+    """Drop edition/version qualifiers (EN+FR) so 'Grand Theft Auto V Version
+    amelioree' and 'Grand Theft Auto V' compare as the same game."""
+    t = normalize(text)
+    t = _EDITION_NOISE_RE.sub(" ", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t).strip()
+    return t
+
+
 def similarity(a, b):
     # Simple similarity; difflib is part of the standard library so we may as
-    # well use it rather than rolling our own.
+    # well use it rather than rolling our own. Also compare noise-stripped
+    # versions and keep the best score: a localized edition suffix
+    # ("Version amelioree", "Definitive Edition"...) should not tank an
+    # otherwise perfect match.
     import difflib
 
-    return difflib.SequenceMatcher(None, normalize(a), normalize(b)).ratio()
+    raw = difflib.SequenceMatcher(None, normalize(a), normalize(b)).ratio()
+    cleaned_a, cleaned_b = strip_edition_noise(a), strip_edition_noise(b)
+    if not cleaned_a or not cleaned_b:
+        return raw
+    cleaned = difflib.SequenceMatcher(None, cleaned_a, cleaned_b).ratio()
+    return max(raw, cleaned)
 
 
 def http_get_json(url, params, timeout=15):
@@ -169,21 +204,37 @@ def http_get_json(url, params, timeout=15):
         return None
 
 
-def steam_find_appid(title, lang, cc):
-    data = http_get_json(
-        STEAM_SEARCH_URL, {"term": title, "l": lang, "cc": cc}
-    )
+def _steam_search_once(term, lang, cc):
+    data = http_get_json(STEAM_SEARCH_URL, {"term": term, "l": lang, "cc": cc})
     if not data or not data.get("items"):
         return None
     best = None
     best_score = 0.0
     for item in data["items"][:5]:
-        score = similarity(title, item.get("name", ""))
+        score = similarity(term, item.get("name", ""))
         if score > best_score:
             best_score = score
             best = item
-    if best and best_score >= 0.6:
+    if best:
         return best["id"], best_score
+    return None
+
+
+def steam_find_appid(title, lang, cc):
+    """Look up a title on the Steam store. Tries the title as given first;
+    if that scores too low (or the API returns nothing, which can happen when
+    the term itself carries too much noise for full-text search), retries
+    once with edition/version qualifiers stripped out."""
+    result = _steam_search_once(title, lang, cc)
+
+    cleaned = strip_edition_noise(title)
+    if cleaned and cleaned != normalize(title) and (not result or result[1] < 0.6):
+        alt = _steam_search_once(cleaned, lang, cc)
+        if alt and (not result or alt[1] > result[1]):
+            result = alt
+
+    if result and result[1] >= 0.6:
+        return result
     return None
 
 

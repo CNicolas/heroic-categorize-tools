@@ -28,6 +28,7 @@ The pattern is the same everywhere: one command **proposes** (a
 
 - `heroic_categorize.py` — Epic/GOG/Amazon categorisation
 - `heroic_import_external.py` — Steam import + not-owned-on-PC import
+- `retry_unmatched.py` — one-off helper: clears cached "no match" entries so an update to the matcher gets a fair retry (see [Add Steam games](#add-steam-games))
 - `mapping.json` — Steam tag → Heroic category table (edit it freely, see [Heroic only](#heroic-only-epic-gog-amazon))
 - `steam-games.EXAMPLE.txt` — template for your Steam library list
 - `favorites-not-on-pc.EXAMPLE.txt` — template for games you own on no PC store
@@ -45,8 +46,8 @@ Generated at runtime, not tracked:
 anything of yours.
 
 It does, however, list every game title it has seen, which effectively is an
-inventory of your library. Same for `steam-games.EXAMPLE.txt` and
-`favorites-not-on-pc.EXAMPLE.txt`. That is personal information, not a security risk:
+inventory of your library. Same for `steam-games.txt` and
+`favorites-not-on-pc.txt`. That is personal information, not a security risk:
 publishing it is roughly like making your Steam profile public. The shipped
 `.gitignore` excludes all three by default; delete those lines if you do not
 mind sharing, or commit a trimmed cache if you want to spare other users some
@@ -248,7 +249,7 @@ python3 heroic_categorize.py apply proposal_steam.csv
 
 What it does:
 
-- compares `steam-games.EXAMPLE.txt` against what Heroic already knows and keeps only
+- compares `steam-games.txt` against what Heroic already knows and keeps only
   the missing titles;
 - filters out demos, betas, public tests, editors, DLC and packs along the way
   (disable with `--no-default-skip`, extend with `--skip "pattern"`);
@@ -264,11 +265,41 @@ What it does:
 Steam must be installed and its URL protocol registered — which it is by
 default on all three platforms.
 
-Useful options: `--no-launcher` (reference-only, non-launchable entries),
-`--keep-unmatched` (keep titles Steam cannot find), `--launchers-dir`
-(different folder for the scripts), `--limit N` (testing).
+**Titles Steam's search can't find.** Some entries in a Steam library never
+get an automatic match — a listing pulled from the store, a name typed in a
+different language than the one the search is querying, or a game genuinely
+removed from sale. By default these are **not dropped**: they are still added
+to the CSV (empty `category`, for you to fill in by hand) and to Heroic, as a
+non-launchable placeholder pointing at a Steam *search* for that title —
+click it from Heroic to look the game up, then fix the title in
+`steam-games.txt` and re-run, or edit the entry by hand once you've found it.
+Pass `--skip-unmatched` to go back to ignoring them entirely instead.
 
-**Producing `steam-games.EXAMPLE.txt`.** One title per line, `#` for comments. Any
+The matcher already strips common edition/version qualifiers before
+comparing titles (in English and French — `Definitive Edition`, `Version
+améliorée`, `GOTY`…), so `Grand Theft Auto V Version améliorée` matches
+`Grand Theft Auto V` correctly. If your `steam-games.txt` is exported from a
+non-English Steam client, also try `--lang french --cc fr` (or your own
+language/country) — the closer the query matches the store's own language,
+the better the match rate.
+
+**Retrying after an update.** Because Steam/SteamSpy responses are cached in
+`steam_cache.json` by exact title, a title once cached as "no match" stays
+that way even after a matching improvement lands — the script never asks
+Steam about it again. Run `retry_unmatched.py` once after pulling an update
+to clear only the failed entries, so the next run retries exactly those:
+
+```bash
+python3 retry_unmatched.py --cache steam_cache.json
+python3 heroic_import_external.py steam --list steam-games.txt
+```
+
+Useful options: `--no-launcher` (reference-only, non-launchable entries even
+for matched games), `--skip-unmatched` (drop unmatched titles instead of
+adding a placeholder), `--launchers-dir` (different folder for the scripts),
+`--limit N` (testing).
+
+**Producing `steam-games.txt`.** One title per line, `#` for comments. Any
 Steam library exporter works; so does copying the list out of the Steam
 client. Exact store spelling helps the appid lookup, but the matcher is
 forgiving.
@@ -297,6 +328,15 @@ and a `browserUrl` pointing at the Steam store page. Clicking one opens the
 page in Heroic's built-in browser, which is handy for checking a price or a
 sale. They all get a `Favorites` category (change it with
 `--extra-category`).
+
+Quite a few favourites will have **no Steam page at all** — this list is
+exactly the games you *don't* own on a PC store, so Battle.net-only
+(Diablo III, Warcraft III), Riot-only (Legends of Runeterra), a publisher's
+own launcher (DOFUS), or console/handheld exclusives (Solatorobo) are
+expected here, not a bug. They still get added — with an empty `category`
+and a generic Steam-search `browserUrl` — so open `proposal_favorites.csv`
+and fill in the category by hand (a couple of clicks, not worth automating
+for a handful of games per import).
 
 A title with no Steam page is still imported, just without artwork or an
 automatic category — fill the `category` cell in by hand before `apply`.
