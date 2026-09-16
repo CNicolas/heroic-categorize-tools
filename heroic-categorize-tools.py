@@ -196,17 +196,47 @@ def similarity(a, b):
     return max(raw, cleaned)
 
 
-def http_get_json(url, params, timeout=15):
+class LookupFailed(Exception):
+    """The API could not be reached, or refused to answer.
+
+    This is deliberately NOT the same thing as "the API answered, and the game
+    is not there". Confusing the two is how a rate-limited run ends up caching
+    hundreds of perfectly findable games as permanently unknown."""
+
+
+def http_get_json(url, params, timeout=15, attempts=3):
+    """GET some JSON, retrying when the server is throttling us.
+
+    Steam's store search starts answering 429 after a few hundred rapid
+    requests, which is exactly what a first full scan does. Backing off and
+    trying again costs a few seconds; treating the 429 as an answer costs a
+    category on every game in the burst."""
     query = urllib.parse.urlencode(params)
     full_url = f"{url}?{query}"
-    req = urllib.request.Request(full_url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
-        print(f"  (warning) request to {url} failed: {e}")
-        return None
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(full_url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw)
+        except urllib.error.HTTPError as e:
+            last_error = e
+            if e.code in (429, 502, 503):
+                wait = 5 * attempt
+                header = e.headers.get("Retry-After") if e.headers else None
+                if header and header.isdigit():
+                    wait = max(wait, int(header))
+                print(f"  (throttled, waiting {wait}s)", end=" ", flush=True)
+                time.sleep(wait)
+                continue
+            break
+        except (urllib.error.URLError, TimeoutError, ValueError) as e:
+            last_error = e
+            time.sleep(2 * attempt)
+
+    raise LookupFailed(f"{url}: {last_error}")
 
 
 def _steam_search_once(term, lang, cc):
@@ -246,7 +276,7 @@ def steam_find_appid(title, lang, cc):
 def steamspy_get_tags_and_genre(appid):
     data = http_get_json(STEAMSPY_URL, {"request": "appdetails", "appid": appid})
     if not data:
-        return [], ""
+        return [], ""  # answered, but knows nothing about this game
     tags = data.get("tags") or {}
     # tags is a dict {"Tag": votes}; sort by descending vote count
     sorted_tags = sorted(tags.items(), key=lambda kv: kv[1], reverse=True)
@@ -366,6 +396,7 @@ def cmd_scan(args):
         cache = load_json(args.cache) or {}
 
     rows = []
+    failed_lookups = []
     total = len(games)
     for i, game in enumerate(games, 1):
         title = game["title"]
@@ -375,20 +406,26 @@ def cmd_scan(args):
             entry = cache[title]
             print("(cached)")
         else:
-            found = steam_find_appid(title, args.lang, args.cc)
-            if not found:
+            try:
+                found = steam_find_appid(title, args.lang, args.cc)
+                if not found:
+                    entry = {"appid": None, "tags": [], "genre": ""}
+                    print("no Steam match")
+                else:
+                    appid, score = found
+                    tags, genre = steamspy_get_tags_and_genre(appid)
+                    entry = {"appid": appid, "tags": tags, "genre": genre}
+                    print(f"appid={appid} (score {score:.2f})")
+                cache[title] = entry
+                # save the cache as we go so an interrupted scan can be resumed
+                with open(args.cache, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=2)
+            except LookupFailed as e:
+                # Nothing is written to the cache: the next run will try again.
                 entry = {"appid": None, "tags": [], "genre": ""}
-                print("no Steam match")
-            else:
-                appid, score = found
-                tags, genre = steamspy_get_tags_and_genre(appid)
-                entry = {"appid": appid, "tags": tags, "genre": genre}
-                print(f"appid={appid} (score {score:.2f})")
-                time.sleep(args.delay)  # be gentle with the SteamSpy API
-            cache[title] = entry
-            # save the cache as we go so an interrupted scan can be resumed
-            with open(args.cache, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
+                failed_lookups.append(title)
+                print(f"lookup failed ({e.__class__.__name__}), will retry next run")
+            time.sleep(args.delay)  # pace every lookup, hit or miss
 
         categories, matched_on = pick_categories(
             entry["tags"], entry["genre"], mapping, args.max_categories, priorities
@@ -416,6 +453,16 @@ def cmd_scan(args):
     matched = sum(1 for r in rows if r["category"])
     print()
     print(f"Done. {matched}/{len(rows)} games received an automatic category.")
+    if failed_lookups:
+        print()
+        print(f"!! {len(failed_lookups)} lookup(s) could not reach Steam and were NOT")
+        print("   cached, so they are simply missing a category for now. This is")
+        print("   normally Steam throttling a long run. Finish them with:")
+        print("       python heroic-categorize-tools.py update")
+        for title in failed_lookups[:5]:
+            print(f"       - {title}")
+        if len(failed_lookups) > 5:
+            print(f"       ... and {len(failed_lookups) - 5} more")
     print(f"Proposal written to: {args.output}")
     print("Open that file (Excel/LibreOffice), fix or complete the 'category'")
     print("column if needed, then run:")
@@ -1126,16 +1173,22 @@ def lookup_steam(title, cache, cache_path, lang, cc, delay):
     Steam/SteamSpy only when necessary."""
     if title in cache:
         return cache[title], True
-    found = steam_find_appid(title, lang, cc)
+    try:
+        found = steam_find_appid(title, lang, cc)
+    except LookupFailed:
+        # Do not remember a failure to reach Steam as "this game does not
+        # exist" -- return an empty entry without caching it.
+        time.sleep(delay)
+        return {"appid": None, "tags": [], "genre": ""}, False
     if not found:
         entry = {"appid": None, "tags": [], "genre": ""}
     else:
         appid, _score = found
         tags, genre = steamspy_get_tags_and_genre(appid)
         entry = {"appid": appid, "tags": tags, "genre": genre}
-        time.sleep(delay)
     cache[title] = entry
     save_cache(cache, cache_path)
+    time.sleep(delay)
     return entry, False
 
 
@@ -1176,6 +1229,33 @@ def make_launcher(launch_dir, title, appid):
     if platform.system() != "Windows":
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path
+
+
+def near_duplicate(key, known_keys, threshold=None):
+    """Is this title already in the library under a slightly different name?
+
+    Stores disagree on edition suffixes: Epic sells "Rise of the Tomb Raider:
+    20 Year Celebration" while Steam calls it "Rise of the Tomb Raider". An
+    exact-key comparison sees two different games and imports a duplicate on
+    top of the real, installable one. So: one name containing the other counts
+    as the same game, as does a high similarity score.
+
+    Returns the matching known key, or None."""
+    if not key:
+        return None
+    if threshold is None:
+        threshold = 0.85
+    for other in known_keys:
+        if not other:
+            continue
+        if key == other:
+            return other
+        shorter, longer = sorted((key, other), key=len)
+        if len(shorter) >= 8 and longer.startswith(shorter + " "):
+            return other
+        if similarity(key, other) >= threshold:
+            return other
+    return None
 
 
 def build_entry(title, appid, kind, launcher_path=None, launch_dir=None):
@@ -1322,6 +1402,10 @@ def run_import(args, kind):
             ignored.append((title, "filtered out (demo/tool/DLC)"))
         elif key in known:
             ignored.append((title, "already in Heroic"))
+        elif not args.no_dedupe and near_duplicate(key, known, args.dedupe_threshold):
+            twin = near_duplicate(key, known, args.dedupe_threshold)
+            ignored.append((title, f"already in Heroic under another name ({twin})"))
+
         elif key in excluded:
             ignored.append((title, "present in another library"))
         else:
@@ -1473,6 +1557,26 @@ def require_heroic_closed(force=False):
     print("Heroic is closed. Good.")
 
 
+# Defaults for options a preset may not know about. A preset builds its own
+# argument objects, so any option added later to a building block would arrive
+# as None and blow up deep inside it -- which is exactly what a missing
+# --dedupe-threshold did. Values here mirror the parser's own defaults.
+SAFE_DEFAULTS = {
+    "dedupe_threshold": 0.85,
+    "no_dedupe": False,
+    "max_categories": 5,
+    "delay": 1.0,
+    "lang": "english",
+    "cc": "us",
+    "limit": 0,
+    "keep": "",
+    "replace": False,
+    "prefix": "",
+    "min_count": 3,
+    "top": 40,
+}
+
+
 class Bag:
     """Tiny argparse.Namespace stand-in, so the preset commands can call the
     building blocks without shelling out to themselves."""
@@ -1481,7 +1585,7 @@ class Bag:
         self.__dict__.update(kw)
 
     def __getattr__(self, name):
-        return None
+        return SAFE_DEFAULTS.get(name)
 
 
 def backup_file(path, label):
@@ -1677,12 +1781,29 @@ def maybe_apply(args, proposal, keep=()):
         print(f"Proposal ready: {proposal}")
         print(f"Review it, then: python {os.path.basename(__file__)} apply {proposal}")
         return False
+    if not os.path.isfile(proposal):
+        print(f"Nothing to apply: {proposal} was not produced.")
+        return False
     if not args.yes and not ask_yes(f"Apply {proposal} to Heroic now?", default=True):
         print(f"Not applied. Run it later with: python {os.path.basename(__file__)} apply {proposal}")
         return False
     require_heroic_closed(args.force)
     cmd_apply(Bag(heroic_dir=args.heroic_dir, proposal=proposal, yes=True,
                   force=True, replace=getattr(args, "replace", False), keep=",".join(keep)))
+    return True
+
+
+def apply_if_present(args, proposal):
+    """Apply a proposal CSV, unless there is nothing to apply.
+
+    An import that finds nothing new writes no file at all, which is the
+    normal outcome of every run after the first one -- so a preset must not
+    treat a missing CSV as an error."""
+    if not os.path.isfile(proposal):
+        print(f"  nothing new to write ({proposal} not produced).")
+        return False
+    cmd_apply(Bag(heroic_dir=args.heroic_dir, proposal=proposal,
+                  yes=True, force=True, replace=False, keep=""))
     return True
 
 
@@ -1722,10 +1843,9 @@ def cmd_full(args):
             lang=args.lang, cc=args.cc, delay=args.delay, skip=None,
             no_default_skip=False, launchers_dir=args.launchers_dir,
             skip_unmatched=False, limit=args.limit, dry_run=False, force=True,
-            verbose=False, no_launcher=False,
+            verbose=False, no_dedupe=False, dedupe_threshold=0.85, no_launcher=False,
         ))
-        cmd_apply(Bag(heroic_dir=args.heroic_dir, proposal="proposal_steam.csv",
-                      yes=True, force=True, replace=False, keep=""))
+        apply_if_present(args, "proposal_steam.csv")
 
     if fav_list:
         say("Importing the games you own on no PC store")
@@ -1737,10 +1857,9 @@ def cmd_full(args):
             lang=args.lang, cc=args.cc, delay=args.delay, skip=None,
             no_default_skip=False, launchers_dir=args.launchers_dir,
             skip_unmatched=False, limit=args.limit, dry_run=False, force=True,
-            verbose=False, no_launcher=True,
+            verbose=False, no_dedupe=False, dedupe_threshold=0.85, no_launcher=True,
         ))
-        cmd_apply(Bag(heroic_dir=args.heroic_dir, proposal="proposal_favorites.csv",
-                      yes=True, force=True, replace=False, keep=""))
+        apply_if_present(args, "proposal_favorites.csv")
 
     keep = [k.strip() for k in (args.keep or "").split(",") if k.strip()]
     if args.fresh_categories:
@@ -1775,10 +1894,9 @@ def cmd_update(args):
             lang=args.lang, cc=args.cc, delay=args.delay, skip=None,
             no_default_skip=False, launchers_dir=args.launchers_dir,
             skip_unmatched=False, limit=args.limit, dry_run=False, force=True,
-            verbose=False, no_launcher=False,
+            verbose=False, no_dedupe=False, dedupe_threshold=0.85, no_launcher=False,
         ))
-        cmd_apply(Bag(heroic_dir=args.heroic_dir, proposal="proposal_steam.csv",
-                      yes=True, force=True, replace=False, keep=""))
+        apply_if_present(args, "proposal_steam.csv")
 
     if fav_list:
         say("Importing favourites added since last time")
@@ -1790,10 +1908,9 @@ def cmd_update(args):
             lang=args.lang, cc=args.cc, delay=args.delay, skip=None,
             no_default_skip=False, launchers_dir=args.launchers_dir,
             skip_unmatched=False, limit=args.limit, dry_run=False, force=True,
-            verbose=False, no_launcher=True,
+            verbose=False, no_dedupe=False, dedupe_threshold=0.85, no_launcher=True,
         ))
-        cmd_apply(Bag(heroic_dir=args.heroic_dir, proposal="proposal_favorites.csv",
-                      yes=True, force=True, replace=False, keep=""))
+        apply_if_present(args, "proposal_favorites.csv")
 
     proposal = run_scan_and_profiles(args, only_uncategorized=not args.all)
     say("Writing the result into Heroic")
@@ -1872,6 +1989,191 @@ def cmd_exclude(args):
     print()
     print("They will drop out of your profiles and join 'Already played' on the next run:")
     print(f"   python {os.path.basename(__file__)} update")
+
+
+# ----------------------------------------------------------------------------
+# Command: theme (tell the imported entries apart, visually)
+# ----------------------------------------------------------------------------
+#
+# An imported entry looks exactly like a real one in Heroic: same tile, same
+# "Play" button, nothing saying it will hand over to Steam or open a web page.
+# Renaming the games would fix that but eats the title, which is truncated
+# already.
+#
+# Heroic puts a data-app-name attribute on every library tile and accepts
+# custom CSS (Settings > Advanced > Custom CSS). Since app_name is derived
+# from the title and is therefore stable, a stylesheet can badge exactly the
+# entries this tool created -- without touching a single byte of your library.
+
+STEAM_ROOTS = [
+    "~/.steam/steam",
+    "~/.steam/root",
+    "~/.local/share/Steam",
+    "~/.var/app/com.valvesoftware.Steam/data/Steam",
+    "~/Library/Application Support/Steam",
+    "C:/Program Files (x86)/Steam",
+]
+
+BADGE_STYLES = {
+    # key: (label, background, text colour, dim the cover?)
+    "installed": ("STEAM", "#1b2838", "#66c0f4", False),
+    "not_installed": ("STEAM ↓", "#4a3b12", "#f5c542", True),
+    "reference": ("NOT ON PC", "#2f2f34", "#c7c7cf", True),
+    "not_found": ("NOT FOUND", "#4a1f1f", "#ff8a8a", True),
+}
+
+
+def steam_installed_appids():
+    """Return the set of appids Steam has actually installed locally.
+
+    Steam writes one appmanifest_<appid>.acf per installed game in each of its
+    library folders, so this is exact and needs no API call."""
+    appids = set()
+    roots = []
+    for root in STEAM_ROOTS:
+        path = os.path.expanduser(root)
+        if os.path.isdir(path):
+            roots.append(path)
+
+    vdf_paths = [os.path.join(r, "steamapps", "libraryfolders.vdf") for r in roots]
+    lib_dirs = [os.path.join(r, "steamapps") for r in roots]
+    for vdf in vdf_paths:
+        if not os.path.isfile(vdf):
+            continue
+        try:
+            with open(vdf, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        for match in re.finditer(r'"path"\s+"([^"]+)"', text):
+            lib_dirs.append(os.path.join(match.group(1).replace("\\\\", "/"), "steamapps"))
+
+    for d in set(lib_dirs):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            found = re.match(r"appmanifest_(\d+)\.acf$", name)
+            if found:
+                appids.add(found.group(1))
+    return appids
+
+
+def appid_from_entry(entry):
+    """Recover the Steam appid from whatever the entry carries (artwork URL or
+    store link) -- we do not store it separately."""
+    for field in ("art_cover", "art_square", "browserUrl"):
+        value = entry.get(field) or ""
+        found = re.search(r"/apps/(\d+)/", value) or re.search(r"/app/(\d+)", value)
+        if found:
+            return found.group(1)
+    return None
+
+
+def classify_entry(entry, installed_appids, check_steam):
+    description = entry.get("description") or ""
+    if "No Steam page found" in description:
+        return "not_found"
+    if "Reference entry" in description:
+        return "reference"
+    if "imported into Heroic" in description:
+        if not check_steam:
+            return "installed"
+        appid = appid_from_entry(entry)
+        if appid and appid in installed_appids:
+            return "installed"
+        return "not_installed"
+    return None
+
+
+def cmd_theme(args):
+    path = os.path.join(args.heroic_dir, SIDELOAD_REL)
+    data = load_json(path)
+    if not data:
+        print(f"Nothing to style: {path} not found.")
+        print("Import some games first with 'steam' or 'favorites'.")
+        return
+
+    check_steam = not args.no_steam_check
+    installed = steam_installed_appids() if check_steam else set()
+    if check_steam:
+        print(f"{len(installed)} game(s) currently installed through Steam on this machine.")
+        if not installed:
+            print("  (no Steam library folder found -- every Steam entry will be badged")
+            print("   as installed. Use --no-steam-check to silence this.)")
+            check_steam = False
+
+    groups = {key: [] for key in BADGE_STYLES}
+    for game in data.get("games", []):
+        kind = classify_entry(game, installed, check_steam)
+        if kind:
+            groups[kind].append((game.get("app_name"), game.get("title")))
+
+    total = sum(len(v) for v in groups.values())
+    if not total:
+        print("No entry created by this tool found in the Heroic library.")
+        return
+
+    lines = [
+        "/* Generated by heroic-categorize-tools.py -- do not edit by hand.",
+        f" * {total} imported entries, {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        " *",
+        " * Paste into Heroic: Settings > Advanced > Custom CSS.",
+        " * Regenerate it after every import: the rules are keyed on app_name.",
+        " */",
+        "",
+    ]
+
+    for kind, (label, background, colour, dim) in BADGE_STYLES.items():
+        entries = groups[kind]
+        if not entries:
+            continue
+        selectors = []
+        for app_name, _title in sorted(entries, key=lambda e: (e[1] or "").lower()):
+            selectors.append(f'.gameCard[data-app-name="{app_name}"]')
+            selectors.append(f'.gameListItem[data-app-name="{app_name}"]')
+
+        lines.append(f"/* {label} -- {len(entries)} game(s) */")
+        lines.append(",\n".join(selectors))
+        lines.append("{")
+        lines.append("  position: relative;")
+        lines.append("}")
+        lines.append("")
+        lines.append(",\n".join(s + "::after" for s in selectors))
+        lines.append("{")
+        lines.append(f'  content: "{label}";')
+        lines.append("  position: absolute;")
+        lines.append("  top: 6px;")
+        lines.append("  left: 6px;")
+        lines.append("  z-index: 20;")
+        lines.append("  padding: 2px 6px;")
+        lines.append("  border-radius: 4px;")
+        lines.append("  font-size: 10px;")
+        lines.append("  font-weight: 700;")
+        lines.append("  letter-spacing: 0.5px;")
+        lines.append("  pointer-events: none;")
+        lines.append(f"  background: {background};")
+        lines.append(f"  color: {colour};")
+        lines.append("  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);")
+        lines.append("}")
+        lines.append("")
+        if dim:
+            lines.append(",\n".join(s + " .gameImg" for s in selectors))
+            lines.append("{")
+            lines.append("  filter: grayscale(0.7) brightness(0.75);")
+            lines.append("}")
+            lines.append("")
+
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print()
+    for kind, (label, _bg, _fg, _dim) in BADGE_STYLES.items():
+        if groups[kind]:
+            print(f"  {len(groups[kind]):4d}  {label}")
+    print()
+    print(f"Stylesheet written: {args.output}")
+    print("In Heroic: Settings > Advanced > Custom CSS, paste the whole file,")
+    print("then reopen the library. Nothing in your game data was modified.")
 
 
 HELP_EPILOG = """
@@ -2082,7 +2384,7 @@ examples
   python %(prog)s proposal_profiles.csv --with "Already played" --min-count 5 --apply
         one category per genre you have already played
 
-  python %(prog)s proposal_profiles.csv --pairs "Couch Duo+Hack'n'Slash, For John+JRPG" --apply
+  python %(prog)s proposal_profiles.csv --pairs "Couch Duo+Hack'n'Slash, For AS+JRPG" --apply
         only those two, whatever their size
 """)
     p_combos.add_argument("proposal", metavar="CSV", help="a CSV produced by scan or profiles")
@@ -2170,7 +2472,7 @@ examples
         epilog="""
 examples
   python %(prog)s "Aven Colony" "ENDLESS Legend"
-  python %(prog)s --from-category "For John"     (coming from a CSV you reviewed)
+  python %(prog)s --from-category "For Clement"     (coming from a CSV you reviewed)
 """)
     p_exclude.add_argument("titles", nargs="*", metavar="TITLE", help="one or more game titles")
     p_exclude.add_argument("--file", default="excluded-titles.txt", metavar="FILE",
@@ -2178,6 +2480,26 @@ examples
     p_exclude.add_argument("--note", default=None, metavar="TEXT",
                            help="comment written above the added titles")
     p_exclude.set_defaults(func=cmd_exclude)
+
+    p_theme = sub.add_parser(
+        "theme", help="badge the imported entries so you can tell them apart",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Generate a small CSS file that marks the entries this tool "
+                    "added: STEAM for a game Steam will launch, STEAM with an arrow "
+                    "when it is not installed yet, NOT ON PC for a reference entry, "
+                    "NOT FOUND when no Steam page was found. Paste it into Heroic: "
+                    "Settings > Advanced > Custom CSS. Your library data is not "
+                    "touched, and the titles keep their real names.",
+        epilog="""
+examples
+  python %(prog)s
+  python %(prog)s --no-steam-check    do not look at which Steam games are installed
+""")
+    p_theme.add_argument("--output", default="heroic-imports.css", metavar="FILE",
+                         help="stylesheet to write (default: heroic-imports.css)")
+    p_theme.add_argument("--no-steam-check", action="store_true",
+                         help="skip reading Steam's install manifests")
+    p_theme.set_defaults(func=cmd_theme)
 
     p_reset = sub.add_parser(
         "reset", help="remove categories from Heroic",
@@ -2246,6 +2568,10 @@ def add_import_options(p, default_output, default_extra):
                    help="keep demos, betas, soundtracks and DLC, which are dropped by default")
     g.add_argument("--skip-unmatched", action="store_true",
                    help="drop titles Steam cannot find instead of adding them without a category")
+    g.add_argument("--no-dedupe", action="store_true",
+                   help="import even when Heroic already has the game under another edition name")
+    g.add_argument("--dedupe-threshold", type=float, default=0.85, metavar="0-1",
+                   help="how close two titles must be to count as the same game (default: 0.85)")
     g = p.add_argument_group("output")
     g.add_argument("--output", default=default_output, metavar="FILE",
                    help=f"CSV to write (default: {default_output})")
