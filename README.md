@@ -29,8 +29,8 @@ The pattern is the same everywhere: one command **proposes** (a
 - `heroic_categorize.py` — Epic/GOG/Amazon categorisation
 - `heroic_import_external.py` — Steam import + not-owned-on-PC import
 - `mapping.json` — Steam tag → Heroic category table (edit it freely, see [Heroic only](#heroic-only-epic-gog-amazon))
-- `steam-games.example.txt` — template for your Steam library list
-- `favorites-not-on-pc.example.txt` — template for games you own on no PC store
+- `steam-games.EXAMPLE.txt` — template for your Steam library list
+- `favorites-not-on-pc.EXAMPLE.txt` — template for games you own on no PC store
 - `.gitignore` — keeps your personal lists and cache out of the repo
 
 Generated at runtime, not tracked:
@@ -45,8 +45,8 @@ Generated at runtime, not tracked:
 anything of yours.
 
 It does, however, list every game title it has seen, which effectively is an
-inventory of your library. Same for `steam-games.txt` and
-`favorites-not-on-pc.txt`. That is personal information, not a security risk:
+inventory of your library. Same for `steam-games.EXAMPLE.txt` and
+`favorites-not-on-pc.EXAMPLE.txt`. That is personal information, not a security risk:
 publishing it is roughly like making your Steam profile public. The shipped
 `.gitignore` excludes all three by default; delete those lines if you do not
 mind sharing, or commit a trimmed cache if you want to spare other users some
@@ -248,7 +248,7 @@ python3 heroic_categorize.py apply proposal_steam.csv
 
 What it does:
 
-- compares `steam-games.txt` against what Heroic already knows and keeps only
+- compares `steam-games.EXAMPLE.txt` against what Heroic already knows and keeps only
   the missing titles;
 - filters out demos, betas, public tests, editors, DLC and packs along the way
   (disable with `--no-default-skip`, extend with `--skip "pattern"`);
@@ -268,7 +268,7 @@ Useful options: `--no-launcher` (reference-only, non-launchable entries),
 `--keep-unmatched` (keep titles Steam cannot find), `--launchers-dir`
 (different folder for the scripts), `--limit N` (testing).
 
-**Producing `steam-games.txt`.** One title per line, `#` for comments. Any
+**Producing `steam-games.EXAMPLE.txt`.** One title per line, `#` for comments. Any
 Steam library exporter works; so does copying the list out of the Steam
 client. Exact store spelling helps the appid lookup, but the matcher is
 forgiving.
