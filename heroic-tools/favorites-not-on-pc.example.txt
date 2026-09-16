@@ -1,0 +1,11 @@
+# Games you have played and care about but own on NO PC store.
+# One title per line; write them as they appear on Steam so the appid lookup
+# can fetch cover art and tags. Titles with no Steam page are still imported,
+# just without art or an automatic category.
+# Lines starting with # are ignored.
+
+Mass Effect Legendary Edition
+Cyberpunk 2077
+The Witcher 3: Wild Hunt
+Ghost of Tsushima DIRECTOR'S CUT
+It Takes Two
