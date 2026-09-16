@@ -1,137 +1,224 @@
 # heroic-categorize-tools
 
-Categorise a [Heroic Games Launcher](https://heroicgameslauncher.com) library
-automatically. Genres and tags come from the public Steam and SteamSpy APIs —
-no account, no API key, no IGDB. One Python file, standard library only.
+Sort a [Heroic Games Launcher](https://heroicgameslauncher.com) library into
+categories automatically. Genres and tags come from the public Steam and
+SteamSpy APIs — no account, no API key, no IGDB. One Python file, standard
+library only.
 
 It also imports the games Heroic cannot see (your Steam library, and games you
-own on no PC store at all) so that everything lives in one launcher.
+own on no PC store at all), so one launcher shows everything.
 
-## Install
+---
+
+# Quick start
+
+⚠️ Close Heroic first.⚠️
 
 ```bash
 git clone https://github.com/CNicolas/heroic-categorize-tools
 cd heroic-categorize-tools
+python3 heroic-categorize-tools.py full
 ```
 
-Python 3.8+, nothing else. Close Heroic before running anything — the tool
-checks, because Heroic overwrites its config on exit and would silently undo
-your work.
+That is it — the tool asks before writing anything, and
+backs up your config beforehand. Expect ~20 minutes for 1000 games the first
+time (one Steam call per game), then seconds, because every answer is cached.
 
-## Three commands
+Afterwards:
 
 ```bash
-python heroic-categorize-tools.py full                # first time
-python heroic-categorize-tools.py full --with-cache   # redo it, no re-download
-python heroic-categorize-tools.py update              # new games only
+python3 heroic-categorize-tools.py update            # you bought new games
+python3 heroic-categorize-tools.py exclude "Hades"   # you finished one
 ```
 
-`full` does everything in order: backs up your config, imports your Steam
-games and your favourites, asks Steam about every title, applies
-`mapping.json`, adds the personal categories from `profiles.json`, and writes
-the result into Heroic after asking you. Expect ~20 minutes for 1000 games the
-first time (one API call per game, one second apart); seconds on the reruns,
-because every answer is cached in `steam_cache.json`.
+Three optional files make the result personal. All of them are plain text and
+none is required:
 
-`update` is the day-to-day version: it only looks at games that are new or
-still uncategorised, and retries the titles Steam failed to match last time.
-
-Add `--no-apply` to any of them to stop at the CSV and review it first.
-
-## The three files you edit
-
-| File | Question it answers | Example |
+| File | Answers | Example line |
 |---|---|---|
-| `mapping.json` | What IS this game? | `"local co-op": "Couch Co-op"` |
-| `profiles.json` | Who is it FOR? | couch co-op **and** not punishing **and** not sad |
-| `excluded-titles.txt` | What should never be suggested again? | games you already finished |
+| `mapping.json` | what a game **is** | `"local co-op": "Couch Co-op"` |
+| `profiles.json` | who it is **for** | couch co-op **and** not punishing **and** not sad |
+| `excluded-titles.txt` | what you already **played** | `Hades` |
 
-Only `mapping.json` is needed. The other two are optional: drop them and the
-personal categories are simply skipped.
+`python3 heroic-categorize-tools.py <command> --help` gives examples for every
+command. The rest of this page explains how it works and how to tune it.
 
-**`mapping.json`** maps a Steam tag to a Heroic category. A tag can produce
-several categories (`"survival horror": ["Horror", "Survival"]`). The
-`_priorities` block decides who wins when a game matches more categories than
-`--max-categories` allows: SteamSpy returns tags by descending vote count and
-the most-voted tags are the most generic ones, so without a priority table the
-informative tags (`local co-op`, `jrpg`, `immersive sim`) get pushed out by
-`action` and `adventure`. Higher number = more specific = kept first.
+---
 
-**`profiles.json`** is where taste lives, and it is deliberately separate.
-`mapping.json` can only express OR — one tag is enough to trigger a category —
-while a personal fit is a conjunction with negations: *local co-op AND NOT
-punishing AND NOT depressing*. Rule syntax:
+# How it works
+
+## The pipeline
+
+```
+Heroic library ──┐
+Steam list     ──┼─→  Steam/SteamSpy  ──→  mapping.json  ──→  proposal.csv
+favourites     ──┘       (cached)           (genres)             │
+                                                                 │
+                                        profiles.json ───────────┤
+                                        (your taste)             │
+                                                                 │
+                                                                 ↓
+                                                      proposal_profiles.csv
+                                                                 ↓
+                                                            Heroic config
+```
+
+`full` and `update` run the whole chain. Each arrow is also a command of its
+own (`scan`, `profiles`, `apply`…) if you would rather review the CSV in a
+spreadsheet before it touches Heroic — add `--no-apply` to stop there.
+
+## The commands
+
+**`full`** — everything, in order: backup, import Steam + favourites, look up
+every title, apply `mapping.json`, add the categories from `profiles.json`,
+write to Heroic. It *replaces* the categories from a previous run rather than
+stacking onto them (keeping `Steam` and `Favorites`), so it is also the right
+command after editing `mapping.json`. `--with-cache` skips the downloading.
+
+**`update`** — the day-to-day one: new titles from your lists, games with no
+category yet, and a retry of the titles Steam failed to find. Add `--all` to
+re-examine everything.
+
+**`combos`** — crosses two categories into one, `Already played+RPG`. See
+[Crossed categories](#crossed-categories).
+
+**`similar`** — ranks your library by tags shared with a game you liked:
+`similar --anchor "Immortals of Aveum"`.
+
+**`exclude`** — appends titles to `excluded-titles.txt`.
+
+**`reset`**, **`cleanup`**, **`retry`** — remove categories, undo the imports,
+forget failed lookups. All three ask first and back up first.
+
+## `mapping.json`: what a game is
+
+A Steam tag on the left, a Heroic category on the right. A tag can produce
+several: `"survival horror": ["Horror", "Survival"]`.
+
+The `_priorities` block decides who wins when a game matches more categories
+than `--max-categories` allows. This matters more than it looks: SteamSpy
+returns tags ordered by vote count, and the most-voted tags are always the
+most generic ones. Without a priority table, `action` and `adventure` fill the
+quota first and the informative tags further down the list — `local co-op`,
+`jrpg`, `immersive sim` — never make it in. Higher number = more specific =
+kept first. Official Steam genres are only consulted when no tag matched at
+all, as a safety net for games with poor data.
+
+A category holding 600 games out of 1200 is not a category. If one of yours
+grows that big, split the tags feeding it rather than raising the cap.
+
+## `profiles.json`: who it is for
+
+Kept separate on purpose. `mapping.json` can only express OR — one tag is
+enough to trigger a category — while a personal fit is a conjunction with
+negations: *local co-op AND NOT punishing AND NOT depressing AND not one we
+already finished*. Mixing the two would mean re-auditing a thousand
+classifications every time a taste changes.
 
 ```jsonc
 {
-  "category": "Couch Duo",
-  "require_categories": ["Couch Co-op"],     // at least one mapping.json category
-  "require_groups": [
-    ["party game", "beat 'em up"],           // list -> at least one of these tags
-    { "min": 3, "tags": ["fps", "magic"] }   // dict -> at least N of these tags
-  ],
-  "require_all": [],                          // every tag mandatory
-  "exclude_any": ["souls-like", "difficult"], // one hit disqualifies
-  "exclude_categories": ["Challenging"]
+  "played_category": "Already played",         
+  "exclude_title_files": ["excluded-titles.txt"], // set to null to switch it off
+
+  "profiles": [
+    {
+      "category": "Couch Duo",
+      "require_categories": ["Couch Co-op"],      // at least one mapping.json category
+      "require_groups": [
+        ["party game", "beat 'em up"],            // list -> at least one of these tags
+        { "min": 3, "tags": ["fps", "magic"] }    // dict -> at least N of these tags
+      ],
+      "require_all": [],                          // every tag mandatory
+      "exclude_any": ["souls-like", "sad"],       // one hit disqualifies
+      "exclude_categories": ["Challenging"],
+      "exclude_title_files": []                   // extra blocklist for this profile only
+    }
+  ]
 }
 ```
 
-Two levers when tuning: `exclude_any` kills a family of false positives
-instantly, and raising a group's `min` from 1 to 3 turns a loose net into a
-shortlist.
+Two levers when tuning, in order of usefulness:
 
-**`excluded-titles.txt`** is one title per line. No Steam tag will ever encode
-"we finished it in 2019", which is exactly why this file exists. Edition
-qualifiers, punctuation and trademark symbols are ignored when matching, plus
-a 0.90 similarity fallback — but sequels are deliberately not collapsed, so
-`Persona 5` does not block `Persona 5 Royal`.
+1. **`exclude_any`** kills a whole family of false positives instantly.
+2. **a group's `min`** turns a loose net into a shortlist — going from 1 to 3
+   on a real library took one profile from 253 candidates down to 48.
+
+A profile that returns nothing usually has a typo in a tag name: tags are the
+SteamSpy ones, lowercase, exactly as they appear in the `top_tags` column of
+`proposal.csv`.
+
+## `excluded-titles.txt`: what you already played
+
+One title per line, `#` starts a comment. No data source can fill this in for
+you — Steam knows a game's tags, not whether you finished it — which is
+exactly why it deserves its own file and its own command:
+
+```bash
+python3 heroic-categorize-tools.py exclude "Aven Colony" "ENDLESS Legend"
+```
+
+Those titles then drop out of every profile, and land in the **`Already
+played`** category on the next run, where you can see them in Heroic and
+notice what is still missing. The list works in both directions: it stops bad
+suggestions, and it becomes a shelf of its own.
+
+Matching ignores edition qualifiers, punctuation and trademark symbols
+(`LEGO® The Hobbit™` = `lego the hobbit`), with a 0.90 similarity fallback.
+Sequels are deliberately *not* collapsed: `Persona 5` does not block
+`Persona 5 Royal`, so genuine variants must be listed.
+
+## Crossed categories
+
+`combos` builds the intersection of two categories as a third one. Fifty
+categories means over a thousand possible pairs, so always pick:
+
+```bash
+# look first, write nothing
+python3 heroic-categorize-tools.py combos proposal_profiles.csv --list
+
+# everything that crosses one category
+python3 heroic-categorize-tools.py combos proposal_profiles.csv \
+    --with "Already played" --min-count 15 --apply
+
+# exactly the ones you want
+python3 heroic-categorize-tools.py combos proposal_profiles.csv \
+    --pairs "For John+Investigation, Couch Duo+Platformer" --apply
+```
+
+`--prefix "0-"` puts the crossed categories at the top of Heroic's list.
 
 ## Optional lists
 
 ```bash
-cp steam-games.EXAMPLE.txt steam-games.txt              # your Steam library
+cp steam-games.EXAMPLE.txt steam-games.txt
 cp favorites-not-on-pc.EXAMPLE.txt favorites-not-on-pc.txt
 ```
 
-Steam games get a real launcher script, so they start from Heroic and Steam
-does the work behind. Favourites are reference-only entries that open the
-Steam page in Heroic's browser — handy for watching a price.
-
-Both are picked up automatically by `full` and `update` if present, and
-skipped without complaint if not.
-
-## Everything else
-
-```
-scan        propose categories for the Epic/GOG/Amazon library -> proposal.csv
-profiles    add the personal categories                        -> proposal_profiles.csv
-steam       import your Steam library
-favorites   import games owned on no PC store
-combos      create AND categories (Action+RPG) from co-occurring pairs
-similar     find "games like X" by shared tags
-apply       write a proposal CSV into Heroic (--replace to overwrite, not add)
-reset       remove categories from Heroic (--keep Steam,Favorites)
-cleanup     remove the entries created by steam/favorites
-retry       forget the "no Steam match" cache entries so they are looked up again
-```
-
-`--help` on any of them.
+Steam games get a small launcher script, so they start from Heroic and Steam
+does the work behind. Favourites are reference entries — console games,
+wishlist items — that open their Steam page when clicked. Both are picked up
+automatically by `full` and `update` when present, and skipped without
+complaint when absent.
 
 ## Good to know
 
-**`apply` adds, it never removes.** So changing `mapping.json` and re-running
-leaves the old categories in place alongside the new ones. `full` handles this
-by clearing them first (keeping `Steam` and `Favorites`); elsewhere use
-`apply --replace` or `reset`.
+**`apply` adds, it never removes.** A game keeps the categories it already
+had, which is what you want for a normal run but means changing `mapping.json`
+leaves the old taxonomy alongside the new one. `full` clears first; elsewhere
+use `apply --replace` or `reset`.
 
-**Games with no category are usually missing data, not a missing rule.** They
-have no Steam page, or SteamSpy has no tags for them. `retry` (and
-`retry --tagless`) is the fix, not a bigger `mapping.json`.
+**Games with no category are missing data, not a missing rule.** They have no
+Steam page, or SteamSpy has no tags for them. `retry` and `retry --tagless`
+are the fix; a bigger `mapping.json` is not.
 
 **Nothing is destructive.** `config.json`, `sideload_apps/library.json` and
 `steam_cache.json` are copied to a timestamped `.bak-` file before any write.
+Restore one by copying it back over the original with Heroic closed.
+
+**Heroic must be closed.** It keeps its config in memory and rewrites it on
+exit, silently undoing a run. The tool detects a live process and waits.
 
 **Privacy.** `steam_cache.json` holds no credentials, no account ID and no
 paths — just `title -> {appid, tags, genre}`. It does inventory your library,
-like a public Steam profile would. Same for your two lists and
-`excluded-titles.txt`. `.gitignore` excludes them by default.
+as a public Steam profile would; same for your lists and `excluded-titles.txt`.
+`.gitignore` excludes them all by default.

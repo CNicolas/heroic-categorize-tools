@@ -427,35 +427,86 @@ def cmd_scan(args):
 # ----------------------------------------------------------------------------
 
 
+def parse_pairs(spec):
+    """Turn 'Already played+RPG, Couch Duo+Puzzle' into [(a, b), ...]."""
+    pairs = []
+    for chunk in (spec or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "+" not in chunk:
+            print(f"  (ignored) '{chunk}' is not a pair -- expected \"A+B\"")
+            continue
+        a, b = [p.strip() for p in chunk.split("+", 1)]
+        if a and b:
+            pairs.append(tuple(sorted((a, b))))
+    return pairs
+
+
 def cmd_combos(args):
+    """Create crossed categories ("Already played+RPG") out of the categories a
+    game already has.
+
+    Left to itself this explodes: fifty categories means over a thousand
+    possible pairs. So there are three ways to pick, from the most controlled
+    to the loosest -- and --list shows what is available before anything is
+    written."""
     with open(args.proposal, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = list(csv.DictReader(f))
 
-    # categories per row (already split on ";")
-    row_categories = []
-    for row in rows:
-        cats = [c.strip() for c in (row.get("category") or "").split(";") if c.strip()]
-        row_categories.append(cats)
+    row_categories = [
+        [c.strip() for c in (row.get("category") or "").split(";") if c.strip()]
+        for row in rows
+    ]
 
-    # for each pair of categories, count how many games carry BOTH
     combo_counts = {}
     for cats in row_categories:
-        if len(cats) < 2:
-            continue
         for a, b in itertools.combinations(sorted(set(cats)), 2):
             combo_counts[(a, b)] = combo_counts.get((a, b), 0) + 1
 
-    kept_combos = {pair for pair, count in combo_counts.items() if count >= args.min_count}
+    if args.list:
+        print(f"Pairs found in {args.proposal} with at least {args.min_count} games:")
+        shown = sorted(
+            ((n, p) for p, n in combo_counts.items() if n >= args.min_count),
+            reverse=True,
+        )
+        for n, (a, b) in shown[: args.top]:
+            print(f"  {n:5d}  {a}+{b}")
+        print()
+        print(f"{len(shown)} pair(s) total. Nothing was written.")
+        return
+
+    if args.pairs:
+        wanted = parse_pairs(args.pairs)
+        kept = []
+        for pair in wanted:
+            count = combo_counts.get(pair, 0)
+            if count == 0:
+                print(f"  (skipped) {pair[0]}+{pair[1]} -- no game has both")
+            else:
+                kept.append(pair)
+        kept_combos = set(kept)
+    elif args.with_category:
+        anchor = args.with_category
+        kept_combos = {
+            pair for pair, count in combo_counts.items()
+            if anchor in pair and count >= args.min_count
+        }
+        if not kept_combos:
+            print(f"No category crosses '{anchor}' with at least {args.min_count} games.")
+            print("Check the spelling with --list, or lower --min-count.")
+            return
+    else:
+        kept_combos = {p for p, n in combo_counts.items() if n >= args.min_count}
 
     if not kept_combos:
         print(f"No combination reaches the threshold of {args.min_count} games. Nothing to do.")
-        print("Try a lower --min-count if you expected some.")
+        print("Try --list to see what is available, or a lower --min-count.")
         return
 
-    print(f"{len(kept_combos)} combination(s) kept (>= {args.min_count} games):")
-    for a, b in sorted(kept_combos):
-        print(f"  {args.prefix}{a}+{b}  ({combo_counts[(a, b)]} games)")
+    print(f"{len(kept_combos)} combination(s) kept:")
+    for a, b in sorted(kept_combos, key=lambda p: -combo_counts[p]):
+        print(f"  {combo_counts[(a, b)]:5d}  {args.prefix}{a}+{b}")
 
     added = 0
     for row, cats in zip(rows, row_categories):
@@ -467,8 +518,7 @@ def cmd_combos(args):
                 if combo_name not in cat_set:
                     extra.append(combo_name)
         if extra:
-            all_cats = cats + extra
-            row["category"] = "; ".join(all_cats)
+            row["category"] = "; ".join(cats + extra)
             added += len(extra)
 
     with open(args.output, "w", encoding="utf-8", newline="") as f:
@@ -479,7 +529,13 @@ def cmd_combos(args):
     print()
     print(f"{added} combined-category membership(s) added.")
     print(f"File written: {args.output}")
-    print(f"Review it, then: python heroic-categorize-tools.py apply {args.output}")
+
+    if args.apply:
+        require_heroic_closed(False)
+        cmd_apply(Bag(heroic_dir=args.heroic_dir, proposal=args.output,
+                      yes=True, force=True, replace=False, keep=""))
+    else:
+        print(f"Review it, then: python {os.path.basename(__file__)} apply {args.output}")
 
 
 # ----------------------------------------------------------------------------
@@ -665,11 +721,16 @@ def title_is_blocked(title, blocked, fuzzy=0.90):
 
 
 def load_profiles(path):
+    """Read profiles.json. Besides the rules themselves it carries two
+    root-level settings: the shared title blocklists, and the name of the
+    category given to every game found in them ("played_category", set to null
+    to switch that off)."""
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
     profiles = raw.get("profiles") or []
     shared_blocklist = raw.get("exclude_title_files") or []
-    return profiles, shared_blocklist
+    played_category = raw.get("played_category", "Already played")
+    return profiles, shared_blocklist, played_category
 
 
 def profile_matches(profile, tags, categories):
@@ -731,8 +792,12 @@ def cmd_profiles(args):
         print("Run 'scan' first to populate the Steam/SteamSpy cache.")
         sys.exit(1)
 
-    profiles, shared_blocklist = load_profiles(args.profiles)
+    profiles, shared_blocklist, played_category = load_profiles(args.profiles)
     print(f"{len(profiles)} profile(s) loaded from {args.profiles}")
+    shared_blocked = load_title_blocklist(shared_blocklist)
+    if played_category:
+        print(f"{len(shared_blocked)} title(s) known as already played/rejected"
+              f" -> category '{played_category}'")
 
     with open(args.proposal, "r", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -750,6 +815,7 @@ def cmd_profiles(args):
 
     counts = {p["category"]: 0 for p in profiles}
     skipped_known = {p["category"]: 0 for p in profiles}
+    played_count = 0
 
     for row in rows:
         title = row.get("title") or ""
@@ -757,6 +823,15 @@ def cmd_profiles(args):
         tags = tags_by_key.get(blocklist_key(title), [])
         added = []
         reasons = []
+
+        # A game you already played is a fact about your library, not a taste
+        # rule: it becomes a category of its own so it shows up in Heroic and
+        # can be crossed with any other one ("Already played" + "Hack'n'Slash").
+        already_played = bool(shared_blocked) and title_is_blocked(title, shared_blocked)
+        if played_category and already_played and played_category not in cats:
+            added.append(played_category)
+            played_count += 1
+
         for prof in profiles:
             name = prof["category"]
             if name in cats:
@@ -783,6 +858,8 @@ def cmd_profiles(args):
         writer.writerows(rows)
 
     print()
+    if played_category:
+        print(f"  {played_count:4d} games tagged '{played_category}'")
     for prof in profiles:
         name = prof["category"]
         print(f"  {counts[name]:4d} games tagged '{name}'"
@@ -1754,156 +1831,437 @@ def final_summary(proposal):
 # ----------------------------------------------------------------------------
 
 
-def add_shared_inputs(p):
-    p.add_argument("--mapping", default="mapping.json", help="Tag -> category table")
-    p.add_argument("--profiles", default="profiles.json", help="Personal-fit rules (skipped if absent)")
-    p.add_argument("--steam-list", default="steam-games.txt", help="Your Steam library (skipped if absent)")
-    p.add_argument("--favorites-list", default="favorites-not-on-pc.txt",
-                   help="Games owned on no PC store (skipped if absent)")
-    p.add_argument("--cache", default="steam_cache.json", help="Steam/SteamSpy cache")
-    p.add_argument("--launchers-dir", default="~/heroic-steam-launchers",
-                   help="Where the Steam launcher scripts go")
-    p.add_argument("--max-categories", type=int, default=5, help="Max categories per game")
-    p.add_argument("--lang", default="english", help="Language requested from Steam")
-    p.add_argument("--cc", default="us", help="Steam country code")
-    p.add_argument("--delay", type=float, default=1.0, help="Delay between two SteamSpy calls")
-    p.add_argument("--limit", type=int, default=0, help="Cap the number of games (testing)")
-    p.add_argument("--no-apply", action="store_true", help="Stop at the CSV, write nothing to Heroic")
-    p.add_argument("-y", "--yes", action="store_true", help="Answer yes to every question")
-    p.add_argument("--force", action="store_true", help="Ignore the running-Heroic detection")
+# ----------------------------------------------------------------------------
+# Command: exclude (maintain the "already played" list)
+# ----------------------------------------------------------------------------
+
+
+def cmd_exclude(args):
+    """Append titles to excluded-titles.txt.
+
+    This is the one file no data source can fill in for you: Steam knows a
+    game's tags, not whether you finished it in 2019. Keeping it one command
+    away is what makes the 'Already played' category trustworthy over time."""
+    if not args.titles:
+        print("Give at least one title, e.g.:")
+        print(f'   python {os.path.basename(__file__)} exclude "Aven Colony" "ENDLESS Legend"')
+        return
+
+    existing = load_title_blocklist([args.file]) if os.path.isfile(args.file) else set()
+    new = []
+    for title in args.titles:
+        if title_is_blocked(title, existing):
+            print(f"  already listed: {title}")
+        else:
+            new.append(title)
+            existing.add(blocklist_key(title))
+
+    if not new:
+        print("Nothing to add.")
+        return
+
+    note = args.note or f"added on {datetime.now().strftime('%Y-%m-%d')}"
+    with open(args.file, "a", encoding="utf-8") as f:
+        f.write(f"\n# --- {note} ---\n")
+        for title in new:
+            f.write(title + "\n")
+
+    print(f"{len(new)} title(s) added to {args.file}:")
+    for title in new:
+        print(f"  + {title}")
+    print()
+    print("They will drop out of your profiles and join 'Already played' on the next run:")
+    print(f"   python {os.path.basename(__file__)} update")
+
+
+HELP_EPILOG = """
+typical use
+-----------
+  first time            python %(prog)s full
+  redo it, no download  python %(prog)s full --with-cache
+  new games only        python %(prog)s update
+
+  see what happened     python %(prog)s combos proposal_profiles.csv --list
+  mark a game as played python %(prog)s exclude "Aven Colony"
+
+Every command has its own examples: %(prog)s <command> --help
+Nothing is written to Heroic without asking, and the config is always
+backed up first.
+"""
+
+
+def add_file_options(p):
+    """The three editable files plus the cache. Same for every preset."""
+    g = p.add_argument_group("which files to use (defaults are fine)")
+    g.add_argument("--mapping", default="mapping.json",
+                   metavar="FILE", help="tag -> category table (default: mapping.json)")
+    g.add_argument("--profiles", default="profiles.json", metavar="FILE",
+                   help="your taste rules; skipped if the file is missing")
+    g.add_argument("--steam-list", default="steam-games.txt", metavar="FILE",
+                   help="your Steam library, one title per line; skipped if missing")
+    g.add_argument("--favorites-list", default="favorites-not-on-pc.txt", metavar="FILE",
+                   help="games you own on no PC store; skipped if missing")
+    g.add_argument("--cache", default="steam_cache.json", metavar="FILE",
+                   help="where Steam answers are kept so they are downloaded once")
+    return g
+
+
+def add_run_options(p):
+    """How the run behaves: questions, safety, speed."""
+    g = p.add_argument_group("how the run behaves")
+    g.add_argument("--no-apply", action="store_true",
+                   help="stop at the CSV; write nothing to Heroic")
+    g.add_argument("-y", "--yes", action="store_true",
+                   help="say yes to every question (unattended run)")
+    g.add_argument("--force", action="store_true",
+                   help="run even if Heroic seems to be open (it usually really is)")
+    return g
+
+
+def add_tuning_options(p, launchers=True):
+    """Knobs almost nobody needs to touch."""
+    g = p.add_argument_group("fine tuning (rarely needed)")
+    g.add_argument("--max-categories", type=int, default=5, metavar="N",
+                   help="how many categories a single game may get (default: 5)")
+    g.add_argument("--delay", type=float, default=1.0, metavar="SECONDS",
+                   help="pause between two Steam calls, to stay polite (default: 1)")
+    g.add_argument("--lang", default="english", metavar="LANG",
+                   help="language asked from Steam when searching a title")
+    g.add_argument("--cc", default="us", metavar="CODE",
+                   help="Steam country code used for the search")
+    g.add_argument("--limit", type=int, default=0, metavar="N",
+                   help="process only the first N games (for testing)")
+    if launchers:
+        g.add_argument("--launchers-dir", default="~/heroic-steam-launchers", metavar="DIR",
+                       help="where the little scripts that start Steam games are written")
+    return g
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Categorise a Heroic Games Launcher library (Steam/SteamSpy data, no account).",
-        epilog="Start with: full  (first time)  /  update  (afterwards)",
+        prog="heroic-categorize-tools.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Sort a Heroic Games Launcher library into categories, using "
+                    "Steam and SteamSpy data. No account, no API key.",
+        epilog=HELP_EPILOG,
     )
-    parser.add_argument("--heroic-dir", default=default_heroic_dir(),
-                        help="Heroic configuration folder")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--heroic-dir", default=default_heroic_dir(), metavar="DIR",
+                        help="Heroic's configuration folder (found automatically)")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
-    # ---- presets -----------------------------------------------------------
-    p_full = sub.add_parser("full", help="Everything, from scratch (the first-time command)")
-    add_shared_inputs(p_full)
-    p_full.add_argument("--with-cache", action="store_true",
-                        help="Reuse the Steam data already downloaded (much faster)")
-    p_full.add_argument("--keep-categories", dest="keep", default="Steam,Favorites",
-                        help="Categories to preserve when clearing (comma-separated)")
-    p_full.add_argument("--no-fresh-categories", dest="fresh_categories", action="store_false",
-                        help="Add to the existing categories instead of replacing them")
+    # ------------------------------------------------------------------ presets
+    p_full = sub.add_parser(
+        "full", help="do everything, from scratch",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Import your Steam games and favourites, ask Steam about every "
+                    "title, apply mapping.json and profiles.json, then write the "
+                    "result into Heroic. Replaces the categories from a previous "
+                    "run instead of stacking onto them.",
+        epilog="""
+examples
+  python %(prog)s                 first time: downloads everything (~20 min / 1000 games)
+  python %(prog)s --with-cache    same, but reuse what was already downloaded (seconds)
+  python %(prog)s --no-apply      build the CSV and stop, so you can read it first
+""")
+    add_file_options(p_full)
+    g = add_run_options(p_full)
+    g.add_argument("--with-cache", action="store_true",
+                   help="reuse the Steam data already downloaded instead of asking again")
+    g.add_argument("--keep-categories", dest="keep", default="Steam,Favorites", metavar="A,B",
+                   help="categories that must survive the clean-up (default: Steam,Favorites)")
+    g.add_argument("--no-fresh-categories", dest="fresh_categories", action="store_false",
+                   help="add to the categories already in Heroic instead of replacing them")
+    add_tuning_options(p_full)
     p_full.set_defaults(func=cmd_full, fresh_categories=True)
 
-    p_update = sub.add_parser("update", help="Only the new or still-uncategorised games")
-    add_shared_inputs(p_update)
-    p_update.add_argument("--all", action="store_true",
-                          help="Re-examine every game, not just the uncategorised ones")
-    p_update.add_argument("--no-retry-unmatched", dest="retry_unmatched", action="store_false",
-                          help="Do not retry the titles Steam never matched")
+    p_update = sub.add_parser(
+        "update", help="only the new or still-uncategorised games",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="The day-to-day command. Imports titles added to your lists, "
+                    "looks up the games Heroic knows but has no category for, and "
+                    "retries the ones Steam failed to find last time.",
+        epilog="""
+examples
+  python %(prog)s              after buying or installing something
+  python %(prog)s --all        re-examine every game, e.g. after editing mapping.json
+""")
+    add_file_options(p_update)
+    g = add_run_options(p_update)
+    g.add_argument("--all", action="store_true",
+                   help="look at every game again, not just the ones without a category")
+    g.add_argument("--no-retry-unmatched", dest="retry_unmatched", action="store_false",
+                   help="do not retry the titles Steam never managed to find")
+    add_tuning_options(p_update)
     p_update.set_defaults(func=cmd_update, retry_unmatched=True)
 
-    # ---- building blocks ---------------------------------------------------
-    p_scan = sub.add_parser("scan", help="Propose categories for the Epic/GOG/Amazon library")
-    p_scan.add_argument("--mapping", default="mapping.json")
-    p_scan.add_argument("--output", default="proposal.csv")
-    p_scan.add_argument("--cache", default="steam_cache.json")
-    p_scan.add_argument("--lang", default="english")
-    p_scan.add_argument("--cc", default="us")
-    p_scan.add_argument("--delay", type=float, default=1.0)
-    p_scan.add_argument("--only-uncategorized", action="store_true")
-    p_scan.add_argument("--max-categories", type=int, default=5)
-    p_scan.add_argument("--limit", type=int, default=0)
+    # ----------------------------------------------------------- building blocks
+    p_scan = sub.add_parser(
+        "scan", help="propose categories, write a CSV (no change to Heroic)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Ask Steam about every game Heroic knows about (Epic, GOG, Amazon "
+                    "and anything imported), apply mapping.json, and write the result "
+                    "to a CSV you can edit before applying it.",
+        epilog="""
+examples
+  python %(prog)s                          full proposal
+  python %(prog)s --only-uncategorized     leave the already-sorted games alone
+  python %(prog)s --limit 20               try it on twenty games first
+""")
+    g = p_scan.add_argument_group("files")
+    g.add_argument("--mapping", default="mapping.json", metavar="FILE",
+                   help="tag -> category table")
+    g.add_argument("--cache", default="steam_cache.json", metavar="FILE",
+                   help="where Steam answers are kept")
+    g.add_argument("--output", default="proposal.csv", metavar="FILE",
+                   help="CSV to write (default: proposal.csv)")
+    g = p_scan.add_argument_group("what to look at")
+    g.add_argument("--only-uncategorized", action="store_true",
+                   help="skip the games that already have a category in Heroic")
+    add_tuning_options(p_scan, launchers=False)
     p_scan.set_defaults(func=cmd_scan)
 
-    p_profiles = sub.add_parser("profiles", help="Add the personal categories from profiles.json")
-    p_profiles.add_argument("proposal", help="CSV produced by scan")
-    p_profiles.add_argument("--profiles", default="profiles.json")
-    p_profiles.add_argument("--cache", default="steam_cache.json")
-    p_profiles.add_argument("--output", default="proposal_profiles.csv")
+    p_profiles = sub.add_parser(
+        "profiles", help="add your personal categories to a CSV",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Read profiles.json and add the personal categories (For me, "
+                    "Couch Duo, Already played...) on top of the genre categories "
+                    "produced by scan.",
+        epilog="""
+examples
+  python %(prog)s proposal.csv
+  python %(prog)s proposal.csv --profiles other-profiles.json
+""")
+    p_profiles.add_argument("proposal", metavar="CSV", help="the file produced by scan")
+    p_profiles.add_argument("--profiles", default="profiles.json", metavar="FILE",
+                            help="your taste rules (default: profiles.json)")
+    p_profiles.add_argument("--cache", default="steam_cache.json", metavar="FILE",
+                            help="where Steam answers are kept")
+    p_profiles.add_argument("--output", default="proposal_profiles.csv", metavar="FILE",
+                            help="CSV to write (default: proposal_profiles.csv)")
     p_profiles.set_defaults(func=cmd_profiles)
 
-    p_steam = sub.add_parser("steam", help="Import Steam games missing from Heroic")
+    p_steam = sub.add_parser(
+        "steam", help="import your Steam library into Heroic",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Heroic cannot see Steam. This adds your Steam games as entries "
+                    "that launch through Steam, so one launcher shows everything.",
+        epilog="""
+examples
+  python %(prog)s --list steam-games.txt --dry-run    see what would happen
+  python %(prog)s --list steam-games.txt              do it
+""")
     add_import_options(p_steam, "proposal_steam.csv", ["Steam"])
     p_steam.add_argument("--no-launcher", action="store_true",
-                         help="Reference-only entries, not launchable")
+                         help="add them for reference only, without making them launchable")
     p_steam.set_defaults(func=cmd_steam)
 
-    p_fav = sub.add_parser("favorites", help="Import games you own on no PC store")
+    p_fav = sub.add_parser(
+        "favorites", help="import games you own on no PC store",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Reference entries for console games or wishlist items: they get "
+                    "artwork and categories, and open their Steam page when clicked.",
+        epilog="""
+example
+  python %(prog)s --list favorites-not-on-pc.txt --exclude-list steam-games.txt
+""")
     add_import_options(p_fav, "proposal_favorites.csv", ["Favorites"])
     p_fav.set_defaults(func=cmd_favorites, no_launcher=True)
 
-    p_combos = sub.add_parser("combos", help="Create AND categories from a proposal CSV")
-    p_combos.add_argument("proposal")
-    p_combos.add_argument("--output", default="proposal_combos.csv")
-    p_combos.add_argument("--min-count", type=int, default=3)
-    p_combos.add_argument("--prefix", default="")
+    p_combos = sub.add_parser(
+        "combos", help="cross two categories into one (Already played+RPG)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Create categories that are the intersection of two others. "
+                    "Left unconstrained this makes hundreds of them, so pick with "
+                    "--pairs (exact list) or --with (everything crossing one "
+                    "category). --list shows what exists without writing anything.",
+        epilog="""
+examples
+  python %(prog)s proposal_profiles.csv --list
+        show the crossings worth making, biggest first
+
+  python %(prog)s proposal_profiles.csv --with "Already played" --min-count 5 --apply
+        one category per genre you have already played
+
+  python %(prog)s proposal_profiles.csv --pairs "Couch Duo+Hack'n'Slash, For John+JRPG" --apply
+        only those two, whatever their size
+""")
+    p_combos.add_argument("proposal", metavar="CSV", help="a CSV produced by scan or profiles")
+    g = p_combos.add_argument_group("which crossings to create")
+    g.add_argument("--pairs", default=None, metavar='"A+B, C+D"',
+                   help="exactly these crossings, comma-separated")
+    g.add_argument("--with", dest="with_category", default=None, metavar="CATEGORY",
+                   help="every crossing involving this category")
+    g.add_argument("--min-count", type=int, default=3, metavar="N",
+                   help="ignore crossings with fewer than N games (default: 3)")
+    g.add_argument("--list", action="store_true",
+                   help="just show what is available and stop")
+    g.add_argument("--top", type=int, default=40, metavar="N",
+                   help="with --list, how many lines to show (default: 40)")
+    g = p_combos.add_argument_group("output")
+    g.add_argument("--output", default="proposal_combos.csv", metavar="FILE",
+                   help="CSV to write (default: proposal_combos.csv)")
+    g.add_argument("--prefix", default="", metavar="TEXT",
+                   help="put this in front of every crossed name, e.g. '0-' to sort them first")
+    g.add_argument("--apply", action="store_true",
+                   help="write the result into Heroic right away")
     p_combos.set_defaults(func=cmd_combos)
 
-    p_similar = sub.add_parser("similar", help="Find games like X")
-    p_similar.add_argument("--cache", default="steam_cache.json")
-    p_similar.add_argument("--anchor", default=None)
-    p_similar.add_argument("--require", default=None)
-    p_similar.add_argument("--require-all", action="store_true")
-    p_similar.add_argument("--exclude", default=None)
-    p_similar.add_argument("--min-shared", type=int, default=2)
-    p_similar.add_argument("--top", type=int, default=25)
-    p_similar.add_argument("--category", default="Suggestions")
-    p_similar.add_argument("--output", default="similar.csv")
+    p_similar = sub.add_parser(
+        "similar", help="find games like one you liked",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Rank your library by how many tags each game shares with a "
+                    "reference title, optionally forcing some tags in or out.",
+        epilog="""
+examples
+  python %(prog)s --anchor "Immortals of Aveum"
+  python %(prog)s --require "local co-op,funny" --exclude "difficult" --category "Couch ideas"
+""")
+    g = p_similar.add_argument_group("what to look for")
+    g.add_argument("--anchor", default=None, metavar="TITLE",
+                   help="a game you liked; the tool looks for games tagged like it")
+    g.add_argument("--require", default=None, metavar="TAGS",
+                   help="tags a game must have, comma-separated")
+    g.add_argument("--require-all", action="store_true",
+                   help="demand every --require tag instead of just one")
+    g.add_argument("--exclude", default=None, metavar="TAGS",
+                   help="tags that disqualify a game, comma-separated")
+    g.add_argument("--min-shared", type=int, default=2, metavar="N",
+                   help="minimum tags shared with --anchor (default: 2)")
+    g.add_argument("--top", type=int, default=25, metavar="N",
+                   help="how many games to keep (default: 25)")
+    g = p_similar.add_argument_group("output")
+    g.add_argument("--category", default="Suggestions", metavar="NAME",
+                   help="name of the category to put them in")
+    g.add_argument("--output", default="similar.csv", metavar="FILE",
+                   help="CSV to write (default: similar.csv)")
+    g.add_argument("--cache", default="steam_cache.json", metavar="FILE",
+                   help="where Steam answers are kept")
     p_similar.set_defaults(func=cmd_similar)
 
-    p_apply = sub.add_parser("apply", help="Write a proposal CSV into the Heroic config")
-    p_apply.add_argument("proposal")
-    p_apply.add_argument("-y", "--yes", action="store_true")
-    p_apply.add_argument("--force", action="store_true")
+    p_apply = sub.add_parser(
+        "apply", help="write a CSV into Heroic",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Take a proposal CSV and put its categories into Heroic's config. "
+                    "By default it only ADDS: a game keeps the categories it already "
+                    "had. Use --replace when a CSV should become the whole truth.",
+        epilog="""
+examples
+  python %(prog)s proposal_profiles.csv
+  python %(prog)s proposal_profiles.csv --replace      forget the previous categories
+""")
+    p_apply.add_argument("proposal", metavar="CSV", help="the file to apply")
+    p_apply.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    p_apply.add_argument("--force", action="store_true",
+                         help="run even if Heroic seems to be open")
     p_apply.add_argument("--replace", action="store_true",
-                         help="Drop each game's current categories instead of adding to them")
-    p_apply.add_argument("--keep", default="Steam,Favorites",
-                         help="Categories --replace must not remove")
+                         help="remove each game's current categories before adding the new ones")
+    p_apply.add_argument("--keep", default="Steam,Favorites", metavar="A,B",
+                         help="categories --replace must never remove")
     p_apply.set_defaults(func=cmd_apply)
 
-    # ---- housekeeping ------------------------------------------------------
-    p_reset = sub.add_parser("reset", help="Remove categories from the Heroic config")
-    p_reset.add_argument("--keep", default="", help="Categories to preserve (comma-separated)")
-    p_reset.add_argument("-y", "--yes", action="store_true")
-    p_reset.add_argument("--force", action="store_true")
+    # -------------------------------------------------------------- housekeeping
+    p_exclude = sub.add_parser(
+        "exclude", help="mark games as already played",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Add titles to excluded-titles.txt: they stop being suggested by "
+                    "any profile, and join the 'Already played' category on the next "
+                    "run. This is the file only you can fill in -- no Steam tag says "
+                    "whether you finished a game.",
+        epilog="""
+examples
+  python %(prog)s "Aven Colony" "ENDLESS Legend"
+  python %(prog)s --from-category "For John"     (coming from a CSV you reviewed)
+""")
+    p_exclude.add_argument("titles", nargs="*", metavar="TITLE", help="one or more game titles")
+    p_exclude.add_argument("--file", default="excluded-titles.txt", metavar="FILE",
+                           help="list to append to (default: excluded-titles.txt)")
+    p_exclude.add_argument("--note", default=None, metavar="TEXT",
+                           help="comment written above the added titles")
+    p_exclude.set_defaults(func=cmd_exclude)
+
+    p_reset = sub.add_parser(
+        "reset", help="remove categories from Heroic",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Empty Heroic's category list. The games themselves are never "
+                    "touched, and the config is backed up first.",
+        epilog="""
+examples
+  python %(prog)s                              remove everything
+  python %(prog)s --keep "Steam,Favorites"     keep where a game comes from
+""")
+    p_reset.add_argument("--keep", default="", metavar="A,B",
+                         help="categories to preserve, comma-separated")
+    p_reset.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    p_reset.add_argument("--force", action="store_true",
+                         help="run even if Heroic seems to be open")
     p_reset.set_defaults(func=cmd_reset)
 
-    p_cleanup = sub.add_parser("cleanup", help="Remove the entries imported by steam/favorites")
-    p_cleanup.add_argument("--launchers-dir", default="~/heroic-steam-launchers")
-    p_cleanup.add_argument("-y", "--yes", action="store_true")
-    p_cleanup.add_argument("--force", action="store_true")
+    p_cleanup = sub.add_parser(
+        "cleanup", help="undo the steam/favorites imports",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Remove the entries this tool added to Heroic (Steam games and "
+                    "favourites). Games you added yourself through Heroic are left "
+                    "alone.",
+        epilog="""
+example
+  python %(prog)s
+""")
+    p_cleanup.add_argument("--launchers-dir", default="~/heroic-steam-launchers", metavar="DIR",
+                           help="folder of generated launcher scripts, offered for deletion too")
+    p_cleanup.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    p_cleanup.add_argument("--force", action="store_true",
+                           help="run even if Heroic seems to be open")
     p_cleanup.set_defaults(func=cmd_cleanup)
 
-    p_retry = sub.add_parser("retry", help="Forget the 'no Steam match' cache entries")
-    p_retry.add_argument("--cache", default="steam_cache.json")
+    p_retry = sub.add_parser(
+        "retry", help="look up again the games Steam could not find",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="A failed lookup is remembered like a successful one, so a title "
+                    "Steam missed once is never asked about again. This forgets those "
+                    "failures so the next run tries them.",
+        epilog="""
+examples
+  python %(prog)s
+  python %(prog)s --tagless    also retry games found on Steam but with no tags
+""")
+    p_retry.add_argument("--cache", default="steam_cache.json", metavar="FILE",
+                         help="where Steam answers are kept")
     p_retry.add_argument("--tagless", action="store_true",
-                         help="Also retry games matched on Steam but with no SteamSpy tags")
-    p_retry.add_argument("-y", "--yes", action="store_true")
+                         help="also retry games found on Steam but for which SteamSpy knows no tag")
+    p_retry.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
     p_retry.set_defaults(func=cmd_retry)
 
     return parser
 
 
 def add_import_options(p, default_output, default_extra):
-    p.add_argument("--list", required=True, help="Text file, one title per line")
-    p.add_argument("--exclude-list", action="append", default=[],
-                   help="List of titles NOT to import (repeatable)")
-    p.add_argument("--mapping", default="mapping.json")
-    p.add_argument("--cache", default="steam_cache.json")
-    p.add_argument("--output", default=default_output)
-    p.add_argument("--extra-category", action="append", default=list(default_extra))
-    p.add_argument("--max-categories", type=int, default=5)
-    p.add_argument("--lang", default="english")
-    p.add_argument("--cc", default="us")
-    p.add_argument("--delay", type=float, default=1.0)
-    p.add_argument("--skip", default=None, help="Additional regex pattern to skip")
-    p.add_argument("--no-default-skip", action="store_true",
-                   help="Disable the demo/beta/tool/DLC filter")
-    p.add_argument("--launchers-dir", default="~/heroic-steam-launchers")
-    p.add_argument("--skip-unmatched", action="store_true")
-    p.add_argument("--limit", type=int, default=0)
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--force", action="store_true")
-    p.add_argument("--verbose", action="store_true")
+    g = p.add_argument_group("what to import")
+    g.add_argument("--list", required=True, metavar="FILE",
+                   help="text file, one title per line ('#' starts a comment)")
+    g.add_argument("--exclude-list", action="append", default=[], metavar="FILE",
+                   help="titles NOT to import; can be given several times")
+    g.add_argument("--skip", default=None, metavar="REGEX",
+                   help="extra pattern of titles to ignore")
+    g.add_argument("--no-default-skip", action="store_true",
+                   help="keep demos, betas, soundtracks and DLC, which are dropped by default")
+    g.add_argument("--skip-unmatched", action="store_true",
+                   help="drop titles Steam cannot find instead of adding them without a category")
+    g = p.add_argument_group("output")
+    g.add_argument("--output", default=default_output, metavar="FILE",
+                   help=f"CSV to write (default: {default_output})")
+    g.add_argument("--extra-category", action="append", default=list(default_extra),
+                   metavar="NAME", help="category added to every imported game; repeatable")
+    g.add_argument("--mapping", default="mapping.json", metavar="FILE",
+                   help="tag -> category table")
+    g.add_argument("--cache", default="steam_cache.json", metavar="FILE",
+                   help="where Steam answers are kept")
+    g = p.add_argument_group("how the run behaves")
+    g.add_argument("--dry-run", action="store_true",
+                   help="show what would be imported, write nothing")
+    g.add_argument("--force", action="store_true",
+                   help="run even if Heroic seems to be open")
+    g.add_argument("--verbose", action="store_true", help="list the skipped titles too")
+    add_tuning_options(p)
 
 
 def main():
