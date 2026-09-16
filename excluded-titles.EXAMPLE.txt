@@ -1,0 +1,29 @@
+# Layer 3: titles no profile should ever suggest again.
+# One title per line, '#' starts a comment. Edition/version qualifiers are
+# stripped automatically, so "Trine" also covers "Trine Enchanted Edition".
+# No Steam tag will ever encode "we finished it in 2019" or "she watched me
+# play it" -- that is exactly why this file exists.
+
+# --- Finished / heavily played ---
+The Elder Scrolls V: Skyrim
+Mass Effect Legendary Edition
+Star Wars: Knights of the Old Republic II - The Sith Lords
+Overcooked! 2
+
+# --- Tried and rejected ---
+Divinity II: Developer's Cut
+Divinity: Original Sin
+Divinity: Original Sin 2
+Warframe
+
+# --- Store-name variants the fuzzy match does not catch on its own ---
+Spore: Galactic Adventures
+Marvel's Spider-Man Remastered
+Dragon Age: Origins
+Dragon Age: Inquisition
+The Outer Worlds: Spacer's Choice Edition
+CRISIS CORE -FINAL FANTASY VII- REUNION
+FINAL FANTASY X/X-2 HD Remaster
+Persona 5 Royal
+HUMANKIND
+The Lord of the Rings: Return to Moria

@@ -1,397 +1,137 @@
-# Heroic Games Launcher — automatic categorisation
+# heroic-categorize-tools
 
-Automatically categorise your [Heroic Games Launcher](https://heroicgameslauncher.com/)
-(2.x) library without IGDB. Genres and tags come from the public Steam Store
-API (no key, no account) and then from SteamSpy (no key, no account), which
-between them cover nearly every PC game — even the ones you bought on
-Epic/GOG/Amazon, and even the ones you own only on Steam or nowhere at all.
+Categorise a [Heroic Games Launcher](https://heroicgameslauncher.com) library
+automatically. Genres and tags come from the public Steam and SteamSpy APIs —
+no account, no API key, no IGDB. One Python file, standard library only.
 
-Works on **Linux, Windows and macOS**. Python 3 standard library only, no
-dependencies to install.
+It also imports the games Heroic cannot see (your Steam library, and games you
+own on no PC store at all) so that everything lives in one launcher.
 
-## Overview
-
-Two scripts, one workflow, always in two steps (scan/import → review → apply)
-so that **nothing is ever written to your configuration without you reviewing
-it first**:
-
-| Script | Role |
-|---|---|
-| `heroic_categorize.py` | Categorises what Heroic already knows natively: Epic (`legendary`), GOG (`gog`), Amazon (`nile`). Commands: `scan`, `apply`, `combos`, `similar`. |
-| `heroic_import_external.py` | Creates the games Heroic cannot see at all, as *sideload* entries: your **Steam** library, and games you have played **without owning them on PC**. Imports `heroic_categorize.py` as a module — no duplicated logic. Commands: `steam`, `favorites`. |
-
-The pattern is the same everywhere: one command **proposes** (a
-`proposal*.csv` you can review and fix in Excel/LibreOffice), another one
-**applies** (`heroic_categorize.py apply ...`) once you are happy.
-
-### Repository layout
-
-- `heroic_categorize.py` — Epic/GOG/Amazon categorisation
-- `heroic_import_external.py` — Steam import + not-owned-on-PC import
-- `retry_unmatched.py` — one-off helper: clears cached "no match" entries so an update to the matcher gets a fair retry (see [Add Steam games](#add-steam-games))
-- `mapping.json` — Steam tag → Heroic category table (edit it freely, see [Heroic only](#heroic-only-epic-gog-amazon))
-- `steam-games.EXAMPLE.txt` — template for your Steam library list
-- `favorites-not-on-pc.EXAMPLE.txt` — template for games you own on no PC store
-- `.gitignore` — keeps your personal lists and cache out of the repo
-
-Generated at runtime, not tracked:
-
-- `steam_cache.json` — cached Steam/SteamSpy responses (keep it between runs so nothing is re-downloaded)
-- `proposal.csv`, `proposal_steam.csv`, `proposal_favorites.csv`, `proposal_combos.csv`, `similar.csv`
-
-### Privacy note
-
-`steam_cache.json` contains **no credentials, no account ID, no file paths**
-— only `title → {appid, tags, genre}`. Nothing in it can be used to access
-anything of yours.
-
-It does, however, list every game title it has seen, which effectively is an
-inventory of your library. Same for `steam-games.txt` and
-`favorites-not-on-pc.txt`. That is personal information, not a security risk:
-publishing it is roughly like making your Steam profile public. The shipped
-`.gitignore` excludes all three by default; delete those lines if you do not
-mind sharing, or commit a trimmed cache if you want to spare other users some
-API calls.
-
-### Requirements
+## Install
 
 ```bash
-python3 --version    # any Python 3
+git clone https://github.com/CNicolas/heroic-categorize-tools
+cd heroic-categorize-tools
 ```
 
-Put every file in the **same folder** (e.g. `~/heroic-tools/` or
-`C:\heroic-tools\`).
+Python 3.8+, nothing else. Close Heroic before running anything — the tool
+checks, because Heroic overwrites its config on exit and would silently undo
+your work.
 
-On Windows, replace `python3` with `python` in every command below.
-
----
-
-## Quickstart
-
-Always close Heroic before writing anything. Closing the window is not
-enough — Heroic usually stays alive in the system tray, keeps the old config
-in memory, and overwrites your changes on its next internal save.
+## Three commands
 
 ```bash
-# Linux / macOS
-ps aux | grep -i heroic      # any line other than grep itself?
-pkill -f -i heroic
+python heroic-categorize-tools.py full                # first time
+python heroic-categorize-tools.py full --with-cache   # redo it, no re-download
+python heroic-categorize-tools.py update              # new games only
 ```
 
-```powershell
-# Windows
-tasklist /FI "IMAGENAME eq Heroic.exe"
-taskkill /F /IM Heroic.exe /T
+`full` does everything in order: backs up your config, imports your Steam
+games and your favourites, asks Steam about every title, applies
+`mapping.json`, adds the personal categories from `profiles.json`, and writes
+the result into Heroic after asking you. Expect ~20 minutes for 1000 games the
+first time (one API call per game, one second apart); seconds on the reruns,
+because every answer is cached in `steam_cache.json`.
+
+`update` is the day-to-day version: it only looks at games that are new or
+still uncategorised, and retries the titles Steam failed to match last time.
+
+Add `--no-apply` to any of them to stop at the CSV and review it first.
+
+## The three files you edit
+
+| File | Question it answers | Example |
+|---|---|---|
+| `mapping.json` | What IS this game? | `"local co-op": "Couch Co-op"` |
+| `profiles.json` | Who is it FOR? | couch co-op **and** not punishing **and** not sad |
+| `excluded-titles.txt` | What should never be suggested again? | games you already finished |
+
+Only `mapping.json` is needed. The other two are optional: drop them and the
+personal categories are simply skipped.
+
+**`mapping.json`** maps a Steam tag to a Heroic category. A tag can produce
+several categories (`"survival horror": ["Horror", "Survival"]`). The
+`_priorities` block decides who wins when a game matches more categories than
+`--max-categories` allows: SteamSpy returns tags by descending vote count and
+the most-voted tags are the most generic ones, so without a priority table the
+informative tags (`local co-op`, `jrpg`, `immersive sim`) get pushed out by
+`action` and `adventure`. Higher number = more specific = kept first.
+
+**`profiles.json`** is where taste lives, and it is deliberately separate.
+`mapping.json` can only express OR — one tag is enough to trigger a category —
+while a personal fit is a conjunction with negations: *local co-op AND NOT
+punishing AND NOT depressing*. Rule syntax:
+
+```jsonc
+{
+  "category": "Couch Duo",
+  "require_categories": ["Couch Co-op"],     // at least one mapping.json category
+  "require_groups": [
+    ["party game", "beat 'em up"],           // list -> at least one of these tags
+    { "min": 3, "tags": ["fps", "magic"] }   // dict -> at least N of these tags
+  ],
+  "require_all": [],                          // every tag mandatory
+  "exclude_any": ["souls-like", "difficult"], // one hit disqualifies
+  "exclude_categories": ["Challenging"]
+}
 ```
 
-(The scripts refuse to run when they detect a live Heroic process, but check
-by hand anyway.)
+Two levers when tuning: `exclude_any` kills a family of false positives
+instantly, and raising a group's `min` from 1 to 3 turns a loose net into a
+shortlist.
 
-### Full init from scratch
+**`excluded-titles.txt`** is one title per line. No Steam tag will ever encode
+"we finished it in 2019", which is exactly why this file exists. Edition
+qualifiers, punctuation and trademark symbols are ignored when matching, plus
+a 0.90 similarity fallback — but sequels are deliberately not collapsed, so
+`Persona 5` does not block `Persona 5 Royal`.
 
-Categorise everything for the first time: the native stores, then Steam, then
-the games you own nowhere.
+## Optional lists
 
 ```bash
-cd ~/heroic-tools
-
-# 1. What Heroic already knows (Epic/GOG/Amazon)
-python3 heroic_categorize.py scan --max-categories 5
-#   -> review/fix proposal.csv, then:
-python3 heroic_categorize.py apply proposal.csv
-
-# 2. Your Steam games (invisible to Heroic)
-cp steam-games.example.txt steam-games.txt   # then fill it with your library
-python3 heroic_import_external.py steam --list steam-games.txt --dry-run
-python3 heroic_import_external.py steam --list steam-games.txt
-#   -> review/fix proposal_steam.csv, then:
-python3 heroic_categorize.py apply proposal_steam.csv
-
-# 3. Your favourites, owned on no PC store
-cp favorites-not-on-pc.example.txt favorites-not-on-pc.txt
-python3 heroic_import_external.py favorites --list favorites-not-on-pc.txt \
-    --exclude-list steam-games.txt
-#   -> review/fix proposal_favorites.csv, then:
-python3 heroic_categorize.py apply proposal_favorites.csv
+cp steam-games.EXAMPLE.txt steam-games.txt              # your Steam library
+cp favorites-not-on-pc.EXAMPLE.txt favorites-not-on-pc.txt
 ```
 
-Restart Heroic: everything is categorised. Options and safeguards for each
-step are in [Detailed](#detailed).
+Steam games get a real launcher script, so they start from Heroic and Steam
+does the work behind. Favourites are reference-only entries that open the
+Steam page in Heroic's browser — handy for watching a price.
 
-### Update files and categories
+Both are picked up automatically by `full` and `update` if present, and
+skipped without complaint if not.
 
-Coming back later: only process what changed. Everything is idempotent —
-re-running with nothing new does nothing (`steam`/`favorites`) or re-scans
-nothing (`--only-uncategorized`).
-
-```bash
-cd ~/heroic-tools
-
-# New Epic/GOG/Amazon games only
-python3 heroic_categorize.py scan --only-uncategorized --max-categories 5
-python3 heroic_categorize.py apply proposal.csv
-
-# steam-games.txt updated? Already-imported titles are skipped automatically.
-python3 heroic_import_external.py steam --list steam-games.txt
-python3 heroic_categorize.py apply proposal_steam.csv
-
-# favorites-not-on-pc.txt extended? Same, only new titles are processed.
-python3 heroic_import_external.py favorites --list favorites-not-on-pc.txt \
-    --exclude-list steam-games.txt
-python3 heroic_categorize.py apply proposal_favorites.csv
-```
-
----
-
-## Detailed
-
-### Heroic only (Epic, GOG, Amazon)
-
-Handled by `heroic_categorize.py`, for what Heroic manages natively.
-
-**Where the config lives.** The script finds it on its own:
-
-| OS | Path |
-|---|---|
-| Linux | `~/.config/heroic/` |
-| Windows | `%APPDATA%\heroic\` |
-| macOS | `~/Library/Application Support/heroic/` |
-
-Inside that folder:
+## Everything else
 
 ```
-store/config.json                       (categories)
-store_cache/legendary_library.json      (Epic games)
-store_cache/gog_library.json            (GOG games)
-store_cache/nile_library.json           (Amazon games)
-sideload_apps/library.json              (manually added games)
+scan        propose categories for the Epic/GOG/Amazon library -> proposal.csv
+profiles    add the personal categories                        -> proposal_profiles.csv
+steam       import your Steam library
+favorites   import games owned on no PC store
+combos      create AND categories (Action+RPG) from co-occurring pairs
+similar     find "games like X" by shared tags
+apply       write a proposal CSV into Heroic (--replace to overwrite, not add)
+reset       remove categories from Heroic (--keep Steam,Favorites)
+cleanup     remove the entries created by steam/favorites
+retry       forget the "no Steam match" cache entries so they are looked up again
 ```
 
-You only need `--heroic-dir` if your config is somewhere else (custom
-profile, Flatpak, portable install):
+`--help` on any of them.
 
-```bash
-python3 heroic_categorize.py --heroic-dir ~/.var/app/com.heroicgameslauncher.hgl/config/heroic scan
-```
+## Good to know
 
-(that is the usual Flatpak path — check with `ls` if the normal one comes up
-empty).
+**`apply` adds, it never removes.** So changing `mapping.json` and re-running
+leaves the old categories in place alongside the new ones. `full` handles this
+by clearing them first (keeping `Steam` and `Favorites`); elsewhere use
+`apply --replace` or `reset`.
 
-**scan.** Reads the Heroic library, queries Steam/SteamSpy, proposes a
-category per game, writes `proposal.csv`.
+**Games with no category are usually missing data, not a missing rule.** They
+have no Steam page, or SteamSpy has no tags for them. `retry` (and
+`retry --tagless`) is the fix, not a bigger `mapping.json`.
 
-```bash
-python3 heroic_categorize.py scan --only-uncategorized --max-categories 5
-```
+**Nothing is destructive.** `config.json`, `sideload_apps/library.json` and
+`steam_cache.json` are copied to a timestamped `.bak-` file before any write.
 
-`--only-uncategorized` skips every game already sitting in a category — handy
-to process only what you added since last time. `--limit N` runs on a small
-sample for testing. `--lang` / `--cc` change the Steam locale (defaults:
-`english` / `us`).
-
-**Review.** Open `proposal.csv` (Excel/LibreOffice Calc). The `category`
-column can hold several categories separated by `; ` (e.g. `Action; RPG`).
-Fix or complete by hand, then save keeping the CSV format.
-
-**apply.** With Heroic closed:
-
-```bash
-python3 heroic_categorize.py apply proposal.csv
-```
-
-The previous `config.json` is backed up automatically
-(`config.json.bak-YYYYMMDD-HHMMSS`), so nothing is ever lost.
-
-**Going further — combined categories and "games like X".**
-
-```bash
-# "Action+RPG" style categories (needs at least 3 games to be created)
-python3 heroic_categorize.py combos proposal.csv --min-count 3
-python3 heroic_categorize.py apply proposal_combos.csv
-
-# Games resembling one specific game in your library
-python3 heroic_categorize.py similar --anchor "Aven Colony" --category "Like Aven Colony" --min-shared 3
-python3 heroic_categorize.py apply similar.csv
-
-# Games with some tags but not others (e.g. narrative FPS, no horror)
-python3 heroic_categorize.py similar --require "fps,story rich" --require-all --exclude "horror" --category "Narrative FPS"
-python3 heroic_categorize.py apply similar.csv
-```
-
-**`mapping.json`.** The Steam tag → category table. An entry can point at one
-category (`"horror": "Horror"`) or several (`"survival horror": ["Horror",
-"Survival"]`). Edit it directly — you never need to touch the Python code.
-Categories are matched against the most-voted SteamSpy tags first, then the
-official Steam genres.
-
-**Reminders.**
-
-- Heroic uses `app_name_runner` as the identifier inside categories (e.g.
-  `dc07b9ead8214591b8df6d2546d2a0e3_legendary`), not `app_name` alone — the
-  script handles that through the CSV's `heroic_id` column.
-- If your config reverts after restarting Heroic, the Heroic process was not
-  fully closed (see [Quickstart](#quickstart)).
-- Every command accepts `-h`: `python3 heroic_categorize.py scan -h`.
-
-### Add Steam games
-
-Heroic only reads Epic/GOG/Amazon, so games you own on **Steam** (KOTOR 2,
-Skyrim, Rise of Nations…) are invisible to it.
-`heroic_import_external.py steam` creates them as *sideload* entries — the
-same mechanism as Heroic's own "Add Game" button — so they can be categorised
-and launched from Heroic.
-
-```bash
-python3 heroic_import_external.py steam --list steam-games.txt --dry-run
-python3 heroic_import_external.py steam --list steam-games.txt
-python3 heroic_categorize.py apply proposal_steam.csv
-```
-
-What it does:
-
-- compares `steam-games.txt` against what Heroic already knows and keeps only
-  the missing titles;
-- filters out demos, betas, public tests, editors, DLC and packs along the way
-  (disable with `--no-default-skip`, extend with `--skip "pattern"`);
-- looks up each game's Steam appid → official artwork (`header.jpg` +
-  `library_600x900.jpg`) and SteamSpy tags;
-- writes a launcher script per game in `~/heroic-steam-launchers/`, handing
-  the `steam://rungameid/<appid>` URL to the OS — a `.sh` on Linux/macOS, a
-  `.cmd` on Windows. **The games really do launch from Heroic**; Steam does
-  the work behind the scenes;
-- applies `mapping.json` to propose categories, plus a `Steam` category added
-  to every entry (change it with `--extra-category`).
-
-Steam must be installed and its URL protocol registered — which it is by
-default on all three platforms.
-
-**Titles Steam's search can't find.** Some entries in a Steam library never
-get an automatic match — a listing pulled from the store, a name typed in a
-different language than the one the search is querying, or a game genuinely
-removed from sale. By default these are **not dropped**: they are still added
-to the CSV (empty `category`, for you to fill in by hand) and to Heroic, as a
-non-launchable placeholder pointing at a Steam *search* for that title —
-click it from Heroic to look the game up, then fix the title in
-`steam-games.txt` and re-run, or edit the entry by hand once you've found it.
-Pass `--skip-unmatched` to go back to ignoring them entirely instead.
-
-The matcher already strips common edition/version qualifiers before
-comparing titles (in English and French — `Definitive Edition`, `Version
-améliorée`, `GOTY`…), so `Grand Theft Auto V Version améliorée` matches
-`Grand Theft Auto V` correctly. If your `steam-games.txt` is exported from a
-non-English Steam client, also try `--lang french --cc fr` (or your own
-language/country) — the closer the query matches the store's own language,
-the better the match rate.
-
-**Retrying after an update.** Because Steam/SteamSpy responses are cached in
-`steam_cache.json` by exact title, a title once cached as "no match" stays
-that way even after a matching improvement lands — the script never asks
-Steam about it again. Run `retry_unmatched.py` once after pulling an update
-to clear only the failed entries, so the next run retries exactly those:
-
-```bash
-python3 retry_unmatched.py --cache steam_cache.json
-python3 heroic_import_external.py steam --list steam-games.txt
-```
-
-Useful options: `--no-launcher` (reference-only, non-launchable entries even
-for matched games), `--skip-unmatched` (drop unmatched titles instead of
-adding a placeholder), `--launchers-dir` (different folder for the scripts),
-`--limit N` (testing).
-
-**Producing `steam-games.txt`.** One title per line, `#` for comments. Any
-Steam library exporter works; so does copying the list out of the Steam
-client. Exact store spelling helps the appid lookup, but the matcher is
-forgiving.
-
-### Add specific other games
-
-Games you have played (console, an old PC, a friend's machine…) but own on
-**no PC store** — invisible both to Heroic and to the `steam` subcommand.
-`heroic_import_external.py favorites` creates them as reference entries.
-
-```bash
-python3 heroic_import_external.py favorites \
-    --list favorites-not-on-pc.txt \
-    --exclude-list steam-games.txt \
-    --exclude-list epic-games.txt --exclude-list gog-games.txt
-python3 heroic_categorize.py apply proposal_favorites.csv
-```
-
-`--exclude-list` is a safety net, repeatable: if a title in your favourites
-list turns out to live in one of your libraries after all, it is skipped
-rather than duplicated. It is optional — Heroic's own library is always
-checked regardless.
-
-These entries are created in **browser** mode: `install.platform = "Browser"`
-and a `browserUrl` pointing at the Steam store page. Clicking one opens the
-page in Heroic's built-in browser, which is handy for checking a price or a
-sale. They all get a `Favorites` category (change it with
-`--extra-category`).
-
-Quite a few favourites will have **no Steam page at all** — this list is
-exactly the games you *don't* own on a PC store, so Battle.net-only
-(Diablo III, Warcraft III), Riot-only (Legends of Runeterra), a publisher's
-own launcher (DOFUS), or console/handheld exclusives (Solatorobo) are
-expected here, not a bug. They still get added — with an empty `category`
-and a generic Steam-search `browserUrl` — so open `proposal_favorites.csv`
-and fill in the category by hand (a couple of clicks, not worth automating
-for a handful of games per import).
-
-A title with no Steam page is still imported, just without artwork or an
-automatic category — fill the `category` cell in by hand before `apply`.
-
-### Clean up / reset
-
-**Restore a config after a mishap.** Every `apply` writes a timestamped
-backup first:
-
-```bash
-ls ~/.config/heroic/store/config.json.bak-*
-cp ~/.config/heroic/store/config.json.bak-YYYYMMDD-HHMMSS ~/.config/heroic/store/config.json
-```
-
-Same for `sideload_apps/library.json.bak-...`, written by
-`heroic_import_external.py`. On Windows, the same files live under
-`%APPDATA%\heroic\` and copy back with `copy`.
-
-**Start a clean scan** without touching the categories already applied in
-Heroic: just delete the generated CSVs (`proposal.csv`, `proposal_steam.csv`,
-`proposal_favorites.csv`, `proposal_combos.csv`, `similar.csv`) and re-run
-`scan` / `steam` / `favorites`. Keep `steam_cache.json` so nothing is
-re-downloaded.
-
-**Remove the imported Steam / favourites entries.** They are the only ones
-with `"runner": "sideload"` and a recognisable description. Save this as
-`cleanup.py` next to the other scripts and run it with Heroic closed:
-
-```python
-import json, os, platform
-
-if platform.system() == "Windows":
-    base = os.path.join(os.environ["APPDATA"], "heroic")
-elif platform.system() == "Darwin":
-    base = os.path.expanduser("~/Library/Application Support/heroic")
-else:
-    base = os.path.expanduser("~/.config/heroic")
-
-path = os.path.join(base, "sideload_apps", "library.json")
-data = json.load(open(path, encoding="utf-8"))
-before = len(data["games"])
-data["games"] = [
-    g for g in data["games"]
-    if "imported into Heroic" not in (g.get("description") or "")
-    and "Reference entry" not in (g.get("description") or "")
-]
-json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-print(f"{before - len(data['games'])} entries removed.")
-```
-
-Categories in `store/config.json` that end up pointing at `heroic_id` values
-which no longer exist are harmless — Heroic ignores them silently. The
-generated launcher scripts in `~/heroic-steam-launchers/` can be deleted by
-hand.
-
-## License
-
-MIT. Do whatever you like with it.
+**Privacy.** `steam_cache.json` holds no credentials, no account ID and no
+paths — just `title -> {appid, tags, genre}`. It does inventory your library,
+like a public Steam profile would. Same for your two lists and
+`excluded-titles.txt`. `.gitignore` excludes them by default.

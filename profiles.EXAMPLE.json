@@ -1,0 +1,90 @@
+{
+  "_comment": "Layer 2: personal fit. mapping.json says what a game IS; this file says who it is FOR. Used by 'python heroic_categorize.py profiles proposal.csv'. Every list holds SteamSpy tags (lowercase) except require_categories / exclude_categories, which hold category names produced by mapping.json.",
+  "_logic": "require_groups = list of groups; a game must match at least one tag in EVERY group (AND of ORs). require_all = every tag required. exclude_any = a single hit disqualifies. require_categories = at least one. Titles listed in the files below are dropped even when the tags match -- that is the only way to encode 'already finished' or 'she watched me play it'.",
+  "exclude_title_files": [
+    "excluded-titles.txt"
+  ],
+  "profiles": [
+    {
+      "category": "Couch Duo",
+      "_note": "Two players, one screen, one couch. The mode is a fact (layer 1 did it); everything below is the taste filter: not punishing, not sad, not a reading exercise, not visually off-putting.",
+      "require_categories": [
+        "Couch Co-op"
+      ],
+      "exclude_any": [
+        "souls-like",
+        "difficult",
+        "permadeath",
+        "bullet hell",
+        "rogue-like",
+        "rogue-lite",
+        "emotional",
+        "sad",
+        "depressing",
+        "psychological horror",
+        "horror",
+        "survival horror",
+        "gore",
+        "visual novel",
+        "interactive fiction",
+        "text-based",
+        "grand strategy",
+        "4x",
+        "turn-based strategy",
+        "pixel graphics",
+        "early access",
+        "pvp",
+        "battle royale",
+        "massively multiplayer"
+      ],
+      "exclude_categories": [
+        "Challenging"
+      ]
+    },
+    {
+      "category": "Couch 3-4",
+      "_note": "Friends on the sofa: short sessions, immediate fun, everyone picks it up in thirty seconds. Long campaigns and anything needing a save file across evenings are excluded.",
+      "require_categories": [
+        "4 Player Local"
+      ],
+      "require_groups": [
+        [
+          "party game",
+          "beat 'em up",
+          "platformer",
+          "2d platformer",
+          "arcade",
+          "fighting",
+          "shoot 'em up",
+          "twin stick shooter",
+          "top-down shooter",
+          "funny",
+          "comedy",
+          "action roguelike",
+          "hack and slash",
+          "puzzle",
+          "local pvp"
+        ]
+      ],
+      "exclude_any": [
+        "souls-like",
+        "permadeath",
+        "visual novel",
+        "interactive fiction",
+        "text-based",
+        "grand strategy",
+        "4x",
+        "turn-based strategy",
+        "city builder",
+        "open world",
+        "story rich",
+        "horror",
+        "survival horror",
+        "psychological horror",
+        "early access",
+        "massively multiplayer",
+        "battle royale"
+      ]
+    }
+  ]
+}

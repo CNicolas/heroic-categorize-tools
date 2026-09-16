@@ -14,3 +14,7 @@ amazon-games.txt
 # Heroic backups, in case you work inside this folder
 *.bak-*
 __pycache__/
+
+# Personal taste rules (the .EXAMPLE versions are tracked instead)
+profiles.json
+excluded-titles.txt
