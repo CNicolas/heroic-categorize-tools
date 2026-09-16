@@ -1,0 +1,11 @@
+# Your Steam library, one title per line.
+# Heroic cannot see Steam, so this list is the only way it learns about these
+# games. Easiest way to produce it: Steam client -> Library -> right-click the
+# column header -> copy the names, or use any Steam library exporter.
+# Lines starting with # are ignored.
+
+STAR WARS Knights of the Old Republic II - The Sith Lords
+The Elder Scrolls V: Skyrim Special Edition
+Rise of Nations: Extended Edition
+Portal 2
+Sid Meier's Civilization VI
